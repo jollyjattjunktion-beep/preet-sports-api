@@ -1,5 +1,4 @@
-# Use Microsoft's official Playwright image (all Linux browser dependencies pre-installed)
-FROM mcr.microsoft.com/playwright:v1.44.0-jammy
+FROM mcr.microsoft.com/playwright:v1.63.0-jammy
 
 WORKDIR /app
 
