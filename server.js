@@ -13,16 +13,18 @@ const MATCH_URL =
 
 let cachedData = {
   team1: "INDW-A",
+  team1Logo: "",
   team2: "AUSW-A",
-  score: "249/5",
-  overs: "35.5",
+  team2Logo: "",
+  score: "269/5",
+  overs: "38.2",
   crr: "-",
   rrr: "-",
   partnership: "-",
   target: "-",
-  batter1: { name: "Batter 1", score: "0 (0)" },
-  batter2: { name: "Batter 2", score: "0 (0)" },
-  bowler: { name: "Bowler", figures: "0-0 (0.0)", econ: "0.00" }
+  batter1: { name: "Batter 1", score: "0 (0)", image: "" },
+  batter2: { name: "Batter 2", score: "0 (0)", image: "" },
+  bowler: { name: "Bowler", figures: "0-0 (0.0)", econ: "0.00", image: "" }
 };
 
 let browserInstance = null;
@@ -50,14 +52,12 @@ async function initBrowser() {
 
     pageInstance = await context.newPage();
 
-    // Abort media to conserve memory
-    await pageInstance.route("**/*.{png,jpg,jpeg,webp,svg,gif,woff,woff2,ttf,css}", (route) => {
-      route.abort();
-    });
+    // Block heavy fonts & video media, but keep images allowed for avatar URLs
+    await pageInstance.route("**/*.{mp4,webm,woff,woff2,ttf,css}", (route) => route.abort());
 
     console.log("Connecting to CREX match...");
     await pageInstance.goto(MATCH_URL, { waitUntil: "domcontentloaded", timeout: 45000 });
-    await pageInstance.waitForTimeout(3000);
+    await pageInstance.waitForTimeout(3500);
 
     scrapeData();
     setInterval(scrapeData, 5000);
@@ -75,15 +75,35 @@ async function scrapeData() {
       const getTxt = (sel) => document.querySelector(sel)?.innerText?.trim() || "";
       const body = document.body.innerText;
 
-      // 1. Teams
+      // Helper to find image URL near a player or team name
+      const findImageNearText = (name) => {
+        if (!name || name === "Batter 1" || name === "Batter 2" || name === "Bowler") return "";
+        const all = Array.from(document.querySelectorAll("*")).filter(
+          (el) => el.children.length === 0 && el.textContent.trim().toLowerCase() === name.toLowerCase()
+        );
+        for (const el of all) {
+          let parent = el.parentElement;
+          for (let i = 0; i < 5 && parent; i++) {
+            const img = parent.querySelector("img");
+            if (img) {
+              const src = img.src || img.getAttribute("data-src") || "";
+              if (src && !src.includes("data:image/svg") && !src.includes("icon")) return src;
+            }
+            parent = parent.parentElement;
+          }
+        }
+        return "";
+      };
+
+      // 1. Teams & Team Logos
       const team1 = getTxt(".team1-name, .t-name:nth-of-type(1)") || "INDW-A";
       const team2 = getTxt(".team2-name, .t-name:nth-of-type(2)") || "AUSW-A";
+      const team1Logo = findImageNearText(team1);
+      const team2Logo = findImageNearText(team2);
 
       // 2. Score & Overs Clean Split
-      // Restricts wickets to 0-10 so it never absorbs the first digit of the over
       let score = "";
       let overs = "";
-
       const scoreOverRegex = /(\b\d{1,3})[-\/](10|[0-9])\s*\(?([0-5]?\d\.[0-6])\)?/g;
       const allMatches = [...body.matchAll(scoreOverRegex)];
 
@@ -104,16 +124,15 @@ async function scrapeData() {
           best = allMatches[allMatches.length - 1];
         }
 
-        score = `${best[1]}/${best[2]}`; // e.g. "249/5"
-        overs = best[3];                 // e.g. "35.5"
+        score = `${best[1]}/${best[2]}`;
+        overs = best[3];
       }
 
-      // 3. Stats Strip
+      // 3. Stats Strip & Target
       const crrMatch = body.match(/CRR\s*[:\n]?\s*([\d\.]+)/i);
       const rrrMatch = body.match(/RRR\s*[:\n]?\s*([\d\.]+)/i);
       const partMatch = body.match(/(?:Partnership|P'ship)\s*[:\n]?\s*([0-9]+\s*\([0-9]+\))/i);
 
-      // Target extraction (explicit "Target" or "need X runs")
       let target = "-";
       const targetMatch = body.match(/Target\s*[:\n]?\s*(\d+)/i);
       if (targetMatch) {
@@ -126,27 +145,31 @@ async function scrapeData() {
         }
       }
 
-      // 4. Batters (N Prasad, M Mani, etc.)
+      // 4. Batters
       const batterMatches = [...body.matchAll(/([A-Z][a-zA-Z\s\.]+)\s*\*?\s+(\d+)\s*\(([0-9]+)\)/g)];
-      let batter1 = { name: "Batter 1", score: "-" };
-      let batter2 = { name: "Batter 2", score: "-" };
+      let batter1 = { name: "Batter 1", score: "-", image: "" };
+      let batter2 = { name: "Batter 2", score: "-", image: "" };
 
       if (batterMatches.length >= 1) {
+        const b1Name = batterMatches[0][1].trim().split("\n").pop();
         batter1 = {
-          name: batterMatches[0][1].trim().split("\n").pop(),
-          score: `${batterMatches[0][2]} (${batterMatches[0][3]})`
+          name: b1Name,
+          score: `${batterMatches[0][2]} (${batterMatches[0][3]})`,
+          image: findImageNearText(b1Name)
         };
       }
       if (batterMatches.length >= 2) {
+        const b2Name = batterMatches[1][1].trim().split("\n").pop();
         batter2 = {
-          name: batterMatches[1][1].trim().split("\n").pop(),
-          score: `${batterMatches[1][2]} (${batterMatches[1][3]})`
+          name: b2Name,
+          score: `${batterMatches[1][2]} (${batterMatches[1][3]})`,
+          image: findImageNearText(b2Name)
         };
       }
 
-      // 5. Bowler (Clean Figures & Economy Calculation)
+      // 5. Bowler
       const bowlerMatch = body.match(/([A-Z][a-zA-Z\s\.]+)\s+(\d+-\d+)\s*\((\d+\.?\d*)\)/);
-      let bowler = { name: "Bowler", figures: "-", econ: "-" };
+      let bowler = { name: "Bowler", figures: "-", econ: "-", image: "" };
 
       if (bowlerMatch) {
         const bName = bowlerMatch[1].trim().split("\n").pop();
@@ -162,13 +185,16 @@ async function scrapeData() {
         bowler = {
           name: bName,
           figures: bFigs,
-          econ: calcEcon
+          econ: calcEcon,
+          image: findImageNearText(bName)
         };
       }
 
       return {
         team1,
+        team1Logo,
         team2,
+        team2Logo,
         score,
         overs,
         crr: crrMatch ? crrMatch[1] : "-",
@@ -181,15 +207,12 @@ async function scrapeData() {
       };
     });
 
-    // Update state only with cleanly extracted values
-    if (extracted.score && extracted.score !== "0/0" && !extracted.score.endsWith("/53")) {
-      cachedData.score = extracted.score;
-    }
-    if (extracted.overs && extracted.overs !== "0.0") {
-      cachedData.overs = extracted.overs;
-    }
+    if (extracted.score && extracted.score !== "0/0") cachedData.score = extracted.score;
+    if (extracted.overs && extracted.overs !== "0.0") cachedData.overs = extracted.overs;
     if (extracted.team1) cachedData.team1 = extracted.team1;
     if (extracted.team2) cachedData.team2 = extracted.team2;
+    if (extracted.team1Logo) cachedData.team1Logo = extracted.team1Logo;
+    if (extracted.team2Logo) cachedData.team2Logo = extracted.team2Logo;
 
     cachedData.crr = extracted.crr;
     cachedData.rrr = extracted.rrr;
