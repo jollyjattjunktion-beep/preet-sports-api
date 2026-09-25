@@ -162,3 +162,23 @@ process.on("SIGTERM", async () => {
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Preet Sports API running on port ${PORT}`);
 });
+const express = require('express');
+const cors = require('cors');
+const app = express();
+
+// Allow requests from your preetsports domain
+app.use(cors({ origin: '*' }));
+
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  next();
+});
+
+// Your API route
+app.get('/api/score', (req, res) => {
+  res.json(cachedData);
+});
+
+app.listen(3000, () => console.log('Relay running on port 3000'));
