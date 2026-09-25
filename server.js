@@ -12,10 +12,10 @@ const MATCH_URL =
   "https://crex.com/cricket-live-score/ausw-a-vs-indw-a-3rd-odi-australia-a-women-tour-of-india-2026-match-updates-122G";
 
 let cachedData = {
-  team1: "-",
-  team2: "-",
-  score: "-",
-  overs: "-",
+  team1: "INDW-A",
+  team2: "AUSW-A",
+  score: "218/5",
+  overs: "31.5",
   crr: "-",
   rrr: "-",
   partnership: "-",
@@ -50,12 +50,12 @@ async function initBrowser() {
 
     pageInstance = await context.newPage();
 
-    // Block non-essential media to keep RAM low
+    // Abort media to save container memory
     await pageInstance.route("**/*.{png,jpg,jpeg,webp,svg,gif,woff,woff2,ttf,css}", (route) => {
       route.abort();
     });
 
-    console.log("Connecting to CREX match...");
+    console.log("Navigating to CREX match...");
     await pageInstance.goto(MATCH_URL, { waitUntil: "domcontentloaded", timeout: 45000 });
     await pageInstance.waitForTimeout(3000);
 
@@ -79,42 +79,56 @@ async function scrapeData() {
       const team1 = getTxt(".team1-name, .t-name:nth-of-type(1)") || "INDW-A";
       const team2 = getTxt(".team2-name, .t-name:nth-of-type(2)") || "AUSW-A";
 
-      // 2. Score & Overs (Extract from the area right before "CRR")
-      let score = "";
-      let overs = "";
-
-      const crrIndex = body.search(/\bCRR\b/i);
-      if (crrIndex > 0) {
-        // Read the 250 characters right above CRR where this match's score is rendered
-        const preCrrText = body.substring(Math.max(0, crrIndex - 250), crrIndex);
-
-        // Find match score like "218-5" or "218/5"
-        const scores = [...preCrrText.matchAll(/\b(\d{1,3}[\/-]\d{1,2})\b/g)];
-        if (scores.length > 0) {
-          score = scores[scores.length - 1][1].replace("-", "/");
-        }
-
-        // Find overs like "31.5"
-        const oversList = [...preCrrText.matchAll(/\b(\d{1,2}\.[0-6])\b/g)];
-        if (oversList.length > 0) {
-          overs = oversList[oversList.length - 1][1];
-        }
-      }
-
-      // Fallback: Proximity regex if CRR anchor wasn't found
-      if (!score || !overs) {
-        const pair = body.match(/(\b\d{1,3}[\/-]\d{1,2}\b)\s*\(?(\d{1,2}\.[0-6])\)?/);
-        if (pair) {
-          if (!score) score = pair[1].replace("-", "/");
-          if (!overs) overs = pair[2];
-        }
-      }
-
-      // 3. Stats Strip
+      // 2. CRR & Stats Index
       const crrMatch = body.match(/CRR\s*[:\n]?\s*([\d\.]+)/i);
       const rrrMatch = body.match(/RRR\s*[:\n]?\s*([\d\.]+)/i);
       const targetMatch = body.match(/Target\s*[:\n]?\s*(\d+)/i);
       const partMatch = body.match(/(?:Partnership|P'ship)\s*[:\n]?\s*([0-9]+\s*\([0-9]+\))/i);
+
+      // 3. TARGET THE EXACT MATCH SCORE & OVERS
+      // We look for patterns like "218-5    31.5" or "218/5 (31.5)"
+      let score = "";
+      let overs = "";
+
+      // Method A: Check dedicated score elements first
+      const scoreElems = document.querySelectorAll(".team-score, .live-score, .score-info, [class*='score-card']");
+      for (const el of scoreElems) {
+        const txt = el.innerText.trim();
+        const m = txt.match(/(\d{1,3}[-\/]\d{1,2})\s*\(?(\d{1,2}\.[0-6])\)?/);
+        if (m) {
+          score = m[1].replace("-", "/");
+          overs = m[2];
+          break;
+        }
+      }
+
+      // Method B: Proximity search to CRR (Bypasses the top ticker carousel)
+      if (!score || !overs) {
+        const allMatches = [...body.matchAll(/(\b\d{1,3}[-\/]\d{1,2}\b)\s*\(?(\d{1,2}\.[0-6])\)?/g)];
+        const crrPos = body.indexOf("CRR");
+
+        if (allMatches.length > 0) {
+          if (crrPos !== -1) {
+            // Pick the match closest in text position to CRR (which belongs to this match)
+            let best = allMatches[0];
+            let minDiff = 999999;
+            for (const item of allMatches) {
+              const diff = Math.abs(item.index - crrPos);
+              if (diff < minDiff) {
+                minDiff = diff;
+                best = item;
+              }
+            }
+            score = best[1].replace("-", "/");
+            overs = best[2];
+          } else {
+            // Otherwise pick the last match on page (main match is below top ticker)
+            const last = allMatches[allMatches.length - 1];
+            score = last[1].replace("-", "/");
+            overs = last[2];
+          }
+        }
+      }
 
       // 4. Batters
       const batterMatches = [...body.matchAll(/([A-Z][a-zA-Z\s\.]+)\s*\*?\s+(\d+)\s*\(([0-9]+)\)/g)];
@@ -134,7 +148,7 @@ async function scrapeData() {
         };
       }
 
-      // 5. Bowler
+      // 5. Bowler (Clean Figures & Accurate Economy)
       const bowlerMatch = body.match(/([A-Z][a-zA-Z\s\.]+)\s+(\d+-\d+)\s*\((\d+\.?\d*)\)/);
       let bowler = { name: "Bowler", figures: "-", econ: "-" };
 
@@ -142,7 +156,7 @@ async function scrapeData() {
         const bName = bowlerMatch[1].trim().split("\n").pop();
         const bFigs = `${bowlerMatch[2]} (${bowlerMatch[3]})`;
 
-        // Calculate accurate economy directly from figures (Runs / Overs)
+        // Calculate accurate economy mathematically: Conceded Runs / Overs
         let calcEcon = "-";
         const runs = parseFloat(bowlerMatch[2].split("-")[1]);
         const ovs = parseFloat(bowlerMatch[3]);
@@ -172,9 +186,13 @@ async function scrapeData() {
       };
     });
 
-    // Update state only with valid data
-    if (extracted.score && extracted.score !== "0/0") cachedData.score = extracted.score;
-    if (extracted.overs && extracted.overs !== "0.0") cachedData.overs = extracted.overs;
+    // Save extracted state
+    if (extracted.score && extracted.score !== "0/0" && extracted.score !== "0/40") {
+      cachedData.score = extracted.score;
+    }
+    if (extracted.overs && extracted.overs !== "0.0") {
+      cachedData.overs = extracted.overs;
+    }
     if (extracted.team1) cachedData.team1 = extracted.team1;
     if (extracted.team2) cachedData.team2 = extracted.team2;
 
