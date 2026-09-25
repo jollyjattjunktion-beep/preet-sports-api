@@ -16,17 +16,21 @@ let cachedData = {
   team1Logo: "",
   team2: "AUSW-A",
   team2Logo: "",
-  score: "269/5",
-  overs: "38.2",
-  commentary: "INDW-A need 94 runs in 70 balls",
-  recentBalls: "Over 38: • 1 4 1 0 2",
-  crr: "-",
-  rrr: "-",
-  partnership: "-",
-  target: "-",
-  batter1: { name: "Batter 1", score: "0 (0)", image: "" },
-  batter2: { name: "Batter 2", score: "0 (0)", image: "" },
-  bowler: { name: "Bowler", figures: "0-0 (0.0)", econ: "0.00", image: "" }
+  score: "311/5",
+  overs: "41.4",
+  liveBall: "6",
+  neededRuns: "INDW-A need 52 runs in 50 balls",
+  recentOvers: [
+    { over: "41", balls: ["0", "4", "1", "0", "1", "1"], total: "7" },
+    { over: "42", balls: ["wd", "0", "1", "0", "6"], total: "8" }
+  ],
+  crr: "7.46",
+  rrr: "6.24",
+  partnership: "101(69)",
+  target: "363",
+  batter1: { name: "N Prasad", score: "75 (70)", image: "" },
+  batter2: { name: "M Mani", score: "59 (35)", image: "" },
+  bowler: { name: "H Silver-Holmes", figures: "0-56 (6.4)", econ: "8.40", image: "" }
 };
 
 let browserInstance = null;
@@ -60,7 +64,7 @@ async function initBrowser() {
     await pageInstance.waitForTimeout(3500);
 
     scrapeData();
-    setInterval(scrapeData, 5000);
+    setInterval(scrapeData, 4000);
   } catch (err) {
     console.error("Browser launch error:", err.message);
     setTimeout(initBrowser, 10000);
@@ -75,8 +79,9 @@ async function scrapeData() {
       const getTxt = (sel) => document.querySelector(sel)?.innerText?.trim() || "";
       const body = document.body.innerText;
 
+      // Image Finder Helper
       const findImageNearText = (name) => {
-        if (!name || name === "Batter 1" || name === "Batter 2" || name === "Bowler") return "";
+        if (!name || name.includes("Batter") || name.includes("Bowler")) return "";
         const all = Array.from(document.querySelectorAll("*")).filter(
           (el) => el.children.length === 0 && el.textContent.trim().toLowerCase() === name.toLowerCase()
         );
@@ -125,28 +130,48 @@ async function scrapeData() {
         overs = best[3];
       }
 
-      // 3. Live Commentary & Match Situation
-      let commentary = "";
+      // 3. Needed Runs Equation
+      let neededRuns = "";
       const needMatch = body.match(/([A-Za-z0-9\-]+\s+need\s+\d+\s+runs\s+in\s+\d+\s+balls)/i);
-      const statusMatch = body.match(/([A-Za-z0-9\-\s]+(?:won by|elected to bat|elected to bowl|lead by|trail by)[^\n\.]+)/i);
-      
       if (needMatch) {
-        commentary = needMatch[1].trim();
-      } else if (statusMatch) {
-        commentary = statusMatch[1].trim();
+        neededRuns = needMatch[1].trim();
       } else {
-        const liveNote = document.querySelector(".live-status, .match-info-status, .equation")?.innerText?.trim();
-        commentary = liveNote || "Match in Progress";
+        const statusMatch = body.match(/([A-Za-z0-9\-\s]+(?:won by|elected to|lead by|trail by)[^\n\.]+)/i);
+        neededRuns = statusMatch ? statusMatch[1].trim() : "Match in Progress";
       }
 
-      // Recent Balls
-      let recentBalls = "";
-      const overMatch = body.match(/Over\s+\d+[\s\S]*?=\s*\d+/i);
-      if (overMatch) {
-        recentBalls = overMatch[0].replace(/\n+/g, " ").trim();
+      // 4. Parse Last Overs & Ball-by-Ball Columns
+      const recentOvers = [];
+      const overBlocks = [...body.matchAll(/Over\s+(\d+)\s+([\s\S]*?)=\s*(\d+)/gi)];
+      for (const ob of overBlocks) {
+        const overNum = ob[1];
+        const rawBalls = ob[2]
+          .trim()
+          .split(/\s+/)
+          .filter((b) => b.length > 0 && !b.includes("Over") && b !== "=");
+        const total = ob[3];
+        recentOvers.push({
+          over: overNum,
+          balls: rawBalls,
+          total: total
+        });
+      }
+      const lastTwoOvers = recentOvers.slice(-2);
+
+      // 5. Live Ball Run in Middle Box
+      let liveBall = "";
+      if (lastTwoOvers.length > 0) {
+        const latestOver = lastTwoOvers[lastTwoOvers.length - 1];
+        if (latestOver.balls.length > 0) {
+          liveBall = latestOver.balls[latestOver.balls.length - 1];
+        }
+      }
+      if (!liveBall) {
+        const centerBig = body.match(/\b([0-6]|4|6|W|wd|nb)\b(?=\s+CRR)/i);
+        liveBall = centerBig ? centerBig[1] : "•";
       }
 
-      // 4. Stats Strip
+      // 6. CRR, RRR, Target, Partnership
       const crrMatch = body.match(/CRR\s*[:\n]?\s*([\d\.]+)/i);
       const rrrMatch = body.match(/RRR\s*[:\n]?\s*([\d\.]+)/i);
       const partMatch = body.match(/(?:Partnership|P'ship)\s*[:\n]?\s*([0-9]+\s*\([0-9]+\))/i);
@@ -162,7 +187,7 @@ async function scrapeData() {
         }
       }
 
-      // 5. Batters
+      // 7. Batters
       const batterMatches = [...body.matchAll(/([A-Z][a-zA-Z\s\.]+)\s*\*?\s+(\d+)\s*\(([0-9]+)\)/g)];
       let batter1 = { name: "Batter 1", score: "-", image: "" };
       let batter2 = { name: "Batter 2", score: "-", image: "" };
@@ -184,7 +209,7 @@ async function scrapeData() {
         };
       }
 
-      // 6. Bowler
+      // 8. Bowler
       const bowlerMatch = body.match(/([A-Z][a-zA-Z\s\.]+)\s+(\d+-\d+)\s*\((\d+\.?\d*)\)/);
       let bowler = { name: "Bowler", figures: "-", econ: "-", image: "" };
 
@@ -213,8 +238,9 @@ async function scrapeData() {
         team2Logo,
         score,
         overs,
-        commentary,
-        recentBalls,
+        liveBall,
+        neededRuns,
+        recentOvers: lastTwoOvers,
         crr: crrMatch ? crrMatch[1] : "-",
         rrr: rrrMatch ? rrrMatch[1] : "-",
         target,
@@ -231,8 +257,9 @@ async function scrapeData() {
     if (extracted.team2) cachedData.team2 = extracted.team2;
     if (extracted.team1Logo) cachedData.team1Logo = extracted.team1Logo;
     if (extracted.team2Logo) cachedData.team2Logo = extracted.team2Logo;
-    if (extracted.commentary) cachedData.commentary = extracted.commentary;
-    if (extracted.recentBalls) cachedData.recentBalls = extracted.recentBalls;
+    if (extracted.liveBall) cachedData.liveBall = extracted.liveBall;
+    if (extracted.neededRuns) cachedData.neededRuns = extracted.neededRuns;
+    if (extracted.recentOvers && extracted.recentOvers.length > 0) cachedData.recentOvers = extracted.recentOvers;
 
     cachedData.crr = extracted.crr;
     cachedData.rrr = extracted.rrr;
