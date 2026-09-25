@@ -1,15 +1,16 @@
-FROM mcr.microsoft.com/playwright:v1.55.0-jammy
+# Use Microsoft's official Playwright image (all Linux browser dependencies pre-installed)
+FROM mcr.microsoft.com/playwright:v1.44.0-jammy
 
 WORKDIR /app
 
+# Install app dependencies
 COPY package*.json ./
 RUN npm install
 
+# Bundle app source
 COPY . .
 
-ENV NODE_ENV=production
-
-# Render sets $PORT itself; server.js already reads process.env.PORT
+ENV PORT=10000
 EXPOSE 10000
 
 CMD ["node", "server.js"]
