@@ -1,13 +1,10 @@
 {
   "name": "preet-sports-scoreboard-api",
   "version": "1.0.0",
-  "private": true,
+  "description": "Preet Sports live cricket scoreboard API",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
-  },
-  "engines": {
-    "node": ">=20 <25"
   },
   "dependencies": {
     "cors": "^2.8.5",
