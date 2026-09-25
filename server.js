@@ -5,36 +5,22 @@ const { chromium } = require("playwright");
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-app.use(cors({
-    origin: [
-        "https://preetsports.cu.ma",
-        "https://www.preetsports.cu.ma"
-    ]
-}));
+// Allow requests from your website or any origin
+app.use(cors({ origin: "*" }));
 
 // ---- Config -------------------------------------------------------------
-// Point this at whichever match page you want the board to follow.
-const MATCH_URL = process.env.CREX_MATCH_URL ||
+const MATCH_URL =
+  process.env.CREX_MATCH_URL ||
   "https://crex.com/cricket-live-score/ausw-a-vs-indw-a-3rd-odi-australia-a-women-tour-of-india-2026-match-updates-122G";
 
-// Don't re-scrape on every request — cache for a bit so you're not hammering
-// their servers (kinder to them, and much faster for you).
-const CACHE_TTL_MS = 15000;
+const CACHE_TTL_MS = 10000; // Cache for 10 seconds to stay responsive
 
-// Simple shared secret so /api/debug isn't a fully open proxy to the world.
-// Set DEBUG_KEY in Render's environment variables; defaults to something
-// you should change.
-const DEBUG_KEY = process.env.DEBUG_KEY || "change-me";
-
-// ---- Browser singleton ---------------------------------------------------
-// Launching a fresh Chromium per request is slow and memory-heavy. Launch
-// once, reuse it, open a new page per scrape.
+// ---- Browser Singleton --------------------------------------------------
 let browserPromise = null;
 function getBrowser() {
   if (!browserPromise) {
     browserPromise = chromium.launch({
       headless: true,
-      // --no-sandbox is required in most containerized hosts (Render, Docker, etc.)
       args: ["--no-sandbox", "--disable-setuid-sandbox"]
     });
   }
@@ -45,8 +31,7 @@ async function withPage(fn) {
   const browser = await getBrowser();
   const context = await browser.newContext({
     userAgent:
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-      "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
     viewport: { width: 1280, height: 900 }
   });
   const page = await context.newPage();
@@ -57,26 +42,81 @@ async function withPage(fn) {
   }
 }
 
-// ---- Scraping -------------------------------------------------------------
-// PLACEHOLDER — this needs your input.
-// I can't see CREX's real rendered DOM (no JS execution on my end), so this
-// function currently just waits for the page to finish loading and returns
-// the visible text. It does NOT yet reliably pull out runs/wickets/overs —
-// see /api/debug below for how we fix that together.
+// ---- Live Scrape Function -----------------------------------------------
 async function scrapeMatch(url) {
   return withPage(async (page) => {
-    await page.goto(url, { waitUntil: "networkidle", timeout: 30000 });
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 35000 });
 
-    // Give client-side rendering a moment to finish painting the live
-    // score widget specifically (networkidle alone isn't always enough
-    // on heavy SPA pages).
-    await page.waitForTimeout(2000);
+    // Wait a brief moment for dynamic client-side hydration
+    await page.waitForTimeout(3000);
 
-    const bodyText = await page.evaluate(() => document.body.innerText);
-    return { bodyText };
+    const matchData = await page.evaluate(() => {
+      const getTxt = (sel) => document.querySelector(sel)?.innerText?.trim() || "";
+
+      // Match info & Scores
+      // CREX standard selector paths
+      const team1 = getTxt(".team-name, .t-name, .team1-name") || "TEAM 1";
+      const team2 = getTxt(".team2-name, .team-name-sec") || "TEAM 2";
+      const scoreStr = getTxt(".team-score, .live-score, .score") || "0/0";
+      const oversStr = getTxt(".overs, .overs-info") || "0.0";
+      
+      const crr = getTxt(".crr, .current-rr") || "-";
+      const rrr = getTxt(".rrr, .req-rr") || "-";
+      const partnership = getTxt(".partnership, .part-info") || "-";
+      const target = getTxt(".target, .target-score") || "-";
+
+      // Batters
+      const batterRows = Array.from(document.querySelectorAll(".batsman-table tbody tr, .live-batsman tr, .batter-card"));
+      let batter1 = { name: "Batter 1", score: "0 (0)" };
+      let batter2 = { name: "Batter 2", score: "0 (0)" };
+
+      if (batterRows.length > 0) {
+        const row1 = batterRows[0].innerText.split("\t").map((s) => s.trim()).filter(Boolean);
+        batter1 = {
+          name: row1[0] || "Batter 1",
+          score: `${row1[1] || 0} (${row1[2] || 0})`
+        };
+      }
+      if (batterRows.length > 1) {
+        const row2 = batterRows[1].innerText.split("\t").map((s) => s.trim()).filter(Boolean);
+        batter2 = {
+          name: row2[0] || "Batter 2",
+          score: `${row2[1] || 0} (${row2[2] || 0})`
+        };
+      }
+
+      // Bowler
+      const bowlerRow = document.querySelector(".bowler-table tbody tr, .live-bowler tr");
+      let bowler = { name: "Bowler", figures: "0-0 (0.0)", econ: "0.00" };
+      if (bowlerRow) {
+        const cols = bowlerRow.innerText.split("\t").map((s) => s.trim()).filter(Boolean);
+        bowler = {
+          name: cols[0] || "Bowler",
+          figures: `${cols[3] || 0}-${cols[2] || 0} (${cols[1] || 0.0})`,
+          econ: cols[4] || "0.00"
+        };
+      }
+
+      return {
+        team1,
+        team2,
+        score: scoreStr,
+        overs: oversStr,
+        crr,
+        rrr,
+        partnership,
+        target,
+        batter1,
+        batter2,
+        bowler
+      };
+    });
+
+    return matchData;
   });
 }
 
+// ---- Cache Manager ------------------------------------------------------
 let cache = { data: null, fetchedAt: 0 };
 
 async function getScoreData() {
@@ -89,68 +129,22 @@ async function getScoreData() {
   return scraped;
 }
 
-// ---- Routes -----------------------------------------------------------
-
+// ---- Routes -------------------------------------------------------------
 app.get("/", (req, res) => {
   res.json({ status: "online", service: "Preet Sports Live Score API" });
 });
 
-// TEMPORARY debug route. Hit this once deployed:
-//   https://your-service.onrender.com/api/debug?key=YOUR_DEBUG_KEY
-// Paste the "bodyText" it returns back into the chat — that's the real
-// rendered page content, and from it I can write exact, working extraction
-// logic instead of guessing. Remove this route once extraction is solid,
-// since it exposes proxied page content to anyone with the key.
-app.get("/api/debug", async (req, res) => {
-  if (req.query.key !== DEBUG_KEY) {
-    return res.status(403).json({ status: "error", message: "Bad or missing key." });
-  }
-  try {
-    const scraped = await scrapeMatch(MATCH_URL);
-    res.json({ status: "ok", ...scraped });
-  } catch (err) {
-    console.error("Debug scrape failed:", err);
-    res.status(502).json({ status: "error", message: err.message });
-  }
-});
-
 app.get("/api/score", async (req, res) => {
   try {
-    const scraped = await getScoreData();
-
-    // Until real selectors are wired in, this still returns your original
-    // static placeholder numbers so the frontend keeps rendering — it just
-    // also attaches the raw scraped text so you can see what's available.
-    res.json({
-      status: "online",
-
-      teams: {
-        batting: { name: "TEAM A", logo: "" },
-        bowling: { name: "TEAM B", logo: "" }
-      },
-
-      score: { runs: 151, wickets: 3, overs: "18.4" },
-      currentRunRate: "8.09",
-      required: { rrr: "9.25" },
-      partnership: "42 (28)",
-      target: "187",
-
-      batters: [
-        { name: "Batter One", runs: 68, balls: 42, fours: 6, sixes: 3, strikeRate: "161.90", image: "" },
-        { name: "Batter Two", runs: 31, balls: 24, fours: 3, sixes: 1, strikeRate: "129.17", image: "" }
-      ],
-
-      bowler: { name: "Bowler One", wickets: 1, runs: 28, overs: "3.4", economy: "7.63", image: "" },
-
-      _debug_note: "Static placeholder data — see /api/debug to help wire up real extraction."
-    });
+    const data = await getScoreData();
+    res.json(data);
   } catch (err) {
     console.error("Score fetch failed:", err);
-    res.status(502).json({ status: "error", message: err.message });
+    res.status(502).json({ error: "Failed to scrape match data", details: err.message });
   }
 });
 
-// ---- Shutdown -------------------------------------------------------------
+// Clean browser process on service restart
 process.on("SIGTERM", async () => {
   if (browserPromise) {
     const browser = await browserPromise;
@@ -162,23 +156,3 @@ process.on("SIGTERM", async () => {
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Preet Sports API running on port ${PORT}`);
 });
-const express = require('express');
-const cors = require('cors');
-const app = express();
-
-// Allow requests from your preetsports domain
-app.use(cors({ origin: '*' }));
-
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type');
-  next();
-});
-
-// Your API route
-app.get('/api/score', (req, res) => {
-  res.json(cachedData);
-});
-
-app.listen(3000, () => console.log('Relay running on port 3000'));
