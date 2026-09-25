@@ -14,8 +14,8 @@ const MATCH_URL =
 let cachedData = {
   team1: "INDW-A",
   team2: "AUSW-A",
-  score: "218/5",
-  overs: "31.5",
+  score: "249/5",
+  overs: "35.5",
   crr: "-",
   rrr: "-",
   partnership: "-",
@@ -50,12 +50,12 @@ async function initBrowser() {
 
     pageInstance = await context.newPage();
 
-    // Abort media to save container memory
+    // Abort media to conserve memory
     await pageInstance.route("**/*.{png,jpg,jpeg,webp,svg,gif,woff,woff2,ttf,css}", (route) => {
       route.abort();
     });
 
-    console.log("Navigating to CREX match...");
+    console.log("Connecting to CREX match...");
     await pageInstance.goto(MATCH_URL, { waitUntil: "domcontentloaded", timeout: 45000 });
     await pageInstance.waitForTimeout(3000);
 
@@ -79,58 +79,54 @@ async function scrapeData() {
       const team1 = getTxt(".team1-name, .t-name:nth-of-type(1)") || "INDW-A";
       const team2 = getTxt(".team2-name, .t-name:nth-of-type(2)") || "AUSW-A";
 
-      // 2. CRR & Stats Index
-      const crrMatch = body.match(/CRR\s*[:\n]?\s*([\d\.]+)/i);
-      const rrrMatch = body.match(/RRR\s*[:\n]?\s*([\d\.]+)/i);
-      const targetMatch = body.match(/Target\s*[:\n]?\s*(\d+)/i);
-      const partMatch = body.match(/(?:Partnership|P'ship)\s*[:\n]?\s*([0-9]+\s*\([0-9]+\))/i);
-
-      // 3. TARGET THE EXACT MATCH SCORE & OVERS
-      // We look for patterns like "218-5    31.5" or "218/5 (31.5)"
+      // 2. Score & Overs Clean Split
+      // Restricts wickets to 0-10 so it never absorbs the first digit of the over
       let score = "";
       let overs = "";
 
-      // Method A: Check dedicated score elements first
-      const scoreElems = document.querySelectorAll(".team-score, .live-score, .score-info, [class*='score-card']");
-      for (const el of scoreElems) {
-        const txt = el.innerText.trim();
-        const m = txt.match(/(\d{1,3}[-\/]\d{1,2})\s*\(?(\d{1,2}\.[0-6])\)?/);
-        if (m) {
-          score = m[1].replace("-", "/");
-          overs = m[2];
-          break;
-        }
-      }
+      const scoreOverRegex = /(\b\d{1,3})[-\/](10|[0-9])\s*\(?([0-5]?\d\.[0-6])\)?/g;
+      const allMatches = [...body.matchAll(scoreOverRegex)];
 
-      // Method B: Proximity search to CRR (Bypasses the top ticker carousel)
-      if (!score || !overs) {
-        const allMatches = [...body.matchAll(/(\b\d{1,3}[-\/]\d{1,2}\b)\s*\(?(\d{1,2}\.[0-6])\)?/g)];
+      if (allMatches.length > 0) {
         const crrPos = body.indexOf("CRR");
+        let best = allMatches[0];
 
-        if (allMatches.length > 0) {
-          if (crrPos !== -1) {
-            // Pick the match closest in text position to CRR (which belongs to this match)
-            let best = allMatches[0];
-            let minDiff = 999999;
-            for (const item of allMatches) {
-              const diff = Math.abs(item.index - crrPos);
-              if (diff < minDiff) {
-                minDiff = diff;
-                best = item;
-              }
+        if (crrPos !== -1) {
+          let minDiff = 999999;
+          for (const m of allMatches) {
+            const diff = Math.abs(m.index - crrPos);
+            if (diff < minDiff) {
+              minDiff = diff;
+              best = m;
             }
-            score = best[1].replace("-", "/");
-            overs = best[2];
-          } else {
-            // Otherwise pick the last match on page (main match is below top ticker)
-            const last = allMatches[allMatches.length - 1];
-            score = last[1].replace("-", "/");
-            overs = last[2];
           }
+        } else {
+          best = allMatches[allMatches.length - 1];
+        }
+
+        score = `${best[1]}/${best[2]}`; // e.g. "249/5"
+        overs = best[3];                 // e.g. "35.5"
+      }
+
+      // 3. Stats Strip
+      const crrMatch = body.match(/CRR\s*[:\n]?\s*([\d\.]+)/i);
+      const rrrMatch = body.match(/RRR\s*[:\n]?\s*([\d\.]+)/i);
+      const partMatch = body.match(/(?:Partnership|P'ship)\s*[:\n]?\s*([0-9]+\s*\([0-9]+\))/i);
+
+      // Target extraction (explicit "Target" or "need X runs")
+      let target = "-";
+      const targetMatch = body.match(/Target\s*[:\n]?\s*(\d+)/i);
+      if (targetMatch) {
+        target = targetMatch[1];
+      } else {
+        const needMatch = body.match(/need\s+(\d+)\s+runs/i);
+        if (needMatch && score) {
+          const currentRuns = parseInt(score.split("/")[0], 10);
+          target = String(currentRuns + parseInt(needMatch[1], 10));
         }
       }
 
-      // 4. Batters
+      // 4. Batters (N Prasad, M Mani, etc.)
       const batterMatches = [...body.matchAll(/([A-Z][a-zA-Z\s\.]+)\s*\*?\s+(\d+)\s*\(([0-9]+)\)/g)];
       let batter1 = { name: "Batter 1", score: "-" };
       let batter2 = { name: "Batter 2", score: "-" };
@@ -148,7 +144,7 @@ async function scrapeData() {
         };
       }
 
-      // 5. Bowler (Clean Figures & Accurate Economy)
+      // 5. Bowler (Clean Figures & Economy Calculation)
       const bowlerMatch = body.match(/([A-Z][a-zA-Z\s\.]+)\s+(\d+-\d+)\s*\((\d+\.?\d*)\)/);
       let bowler = { name: "Bowler", figures: "-", econ: "-" };
 
@@ -156,7 +152,6 @@ async function scrapeData() {
         const bName = bowlerMatch[1].trim().split("\n").pop();
         const bFigs = `${bowlerMatch[2]} (${bowlerMatch[3]})`;
 
-        // Calculate accurate economy mathematically: Conceded Runs / Overs
         let calcEcon = "-";
         const runs = parseFloat(bowlerMatch[2].split("-")[1]);
         const ovs = parseFloat(bowlerMatch[3]);
@@ -178,7 +173,7 @@ async function scrapeData() {
         overs,
         crr: crrMatch ? crrMatch[1] : "-",
         rrr: rrrMatch ? rrrMatch[1] : "-",
-        target: targetMatch ? targetMatch[1] : "-",
+        target,
         partnership: partMatch ? partMatch[1] : "-",
         batter1,
         batter2,
@@ -186,8 +181,8 @@ async function scrapeData() {
       };
     });
 
-    // Save extracted state
-    if (extracted.score && extracted.score !== "0/0" && extracted.score !== "0/40") {
+    // Update state only with cleanly extracted values
+    if (extracted.score && extracted.score !== "0/0" && !extracted.score.endsWith("/53")) {
       cachedData.score = extracted.score;
     }
     if (extracted.overs && extracted.overs !== "0.0") {
