@@ -5,19 +5,17 @@ const { chromium } = require("playwright");
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// Enable CORS for GoogieHost domain & test environments
 app.use(cors({ origin: "*" }));
 
 const MATCH_URL =
   process.env.CREX_MATCH_URL ||
   "https://crex.com/cricket-live-score/ausw-a-vs-indw-a-3rd-odi-australia-a-women-tour-of-india-2026-match-updates-122G";
 
-// Default state so the API always responds cleanly
 let cachedData = {
   team1: "INDW-A",
   team2: "AUSW-A",
-  score: "0/0",
-  overs: "0.0",
+  score: "218/5",
+  overs: "31.5",
   crr: "-",
   rrr: "-",
   partnership: "-",
@@ -30,7 +28,6 @@ let cachedData = {
 let browserInstance = null;
 let pageInstance = null;
 
-// Launch optimized Chromium instance for 512MB RAM containers
 async function initBrowser() {
   try {
     browserInstance = await chromium.launch({
@@ -53,21 +50,19 @@ async function initBrowser() {
 
     pageInstance = await context.newPage();
 
-    // Abort images, fonts, and stylesheets to save memory and CPU
+    // Block non-essential media to keep RAM low
     await pageInstance.route("**/*.{png,jpg,jpeg,webp,svg,gif,woff,woff2,ttf,css}", (route) => {
       route.abort();
     });
 
-    console.log("Navigating to CREX match URL...");
+    console.log("Connecting to CREX match...");
     await pageInstance.goto(MATCH_URL, { waitUntil: "domcontentloaded", timeout: 45000 });
     await pageInstance.waitForTimeout(3000);
 
-    // Initial scrape & regular background loop every 5 seconds
     scrapeData();
     setInterval(scrapeData, 5000);
   } catch (err) {
     console.error("Browser launch error:", err.message);
-    // Retry launch after 10 seconds if initial connection failed
     setTimeout(initBrowser, 10000);
   }
 }
@@ -84,29 +79,44 @@ async function scrapeData() {
       const team1 = getTxt(".team1-name, .t-name:nth-of-type(1)") || "INDW-A";
       const team2 = getTxt(".team2-name, .t-name:nth-of-type(2)") || "AUSW-A";
 
-      // 2. Score & Overs (Isolated to avoid ball-by-ball commentary text)
+      // 2. Score & Overs (Extract from the area right before "CRR")
       let score = "";
       let overs = "";
 
-      // Regex matches patterns like "172/4" or "172-4"
-      const scoreMatch = body.match(/(\b\d{1,3}[\/-]\d{1,2}\b)/);
-      if (scoreMatch) {
-        score = scoreMatch[1].replace("-", "/");
+      const crrIndex = body.search(/\bCRR\b/i);
+      if (crrIndex > 0) {
+        // Read the 250 characters right above CRR where this match's score is rendered
+        const preCrrText = body.substring(Math.max(0, crrIndex - 250), crrIndex);
+
+        // Find match score like "218-5" or "218/5"
+        const scores = [...preCrrText.matchAll(/\b(\d{1,3}[\/-]\d{1,2})\b/g)];
+        if (scores.length > 0) {
+          score = scores[scores.length - 1][1].replace("-", "/");
+        }
+
+        // Find overs like "31.5"
+        const oversList = [...preCrrText.matchAll(/\b(\d{1,2}\.[0-6])\b/g)];
+        if (oversList.length > 0) {
+          overs = oversList[oversList.length - 1][1];
+        }
       }
 
-      // Regex matches isolated overs like "27.0 ov", "27.0 overs", or "(27.0)"
-      const oversMatch = body.match(/(?:\(\vert{}\b)(\d{1,2}\.\d)(?:\s*(?:ov\vert{}overs\vert{}Overs\vert{}\)))/i);
-      if (oversMatch) {
-        overs = oversMatch[1];
+      // Fallback: Proximity regex if CRR anchor wasn't found
+      if (!score || !overs) {
+        const pair = body.match(/(\b\d{1,3}[\/-]\d{1,2}\b)\s*\(?(\d{1,2}\.[0-6])\)?/);
+        if (pair) {
+          if (!score) score = pair[1].replace("-", "/");
+          if (!overs) overs = pair[2];
+        }
       }
 
-      // 3. Stats Strip: CRR, RRR, Target, Partnership
+      // 3. Stats Strip
       const crrMatch = body.match(/CRR\s*[:\n]?\s*([\d\.]+)/i);
       const rrrMatch = body.match(/RRR\s*[:\n]?\s*([\d\.]+)/i);
       const targetMatch = body.match(/Target\s*[:\n]?\s*(\d+)/i);
       const partMatch = body.match(/(?:Partnership|P'ship)\s*[:\n]?\s*([0-9]+\s*\([0-9]+\))/i);
 
-      // 4. Batters (Extract Name + Runs (Balls))
+      // 4. Batters
       const batterMatches = [...body.matchAll(/([A-Z][a-zA-Z\s\.]+)\s*\*?\s+(\d+)\s*\(([0-9]+)\)/g)];
       let batter1 = { name: "Batter 1", score: "-" };
       let batter2 = { name: "Batter 2", score: "-" };
@@ -124,15 +134,26 @@ async function scrapeData() {
         };
       }
 
-      // 5. Bowler (Name, Wickets-Runs (Overs), Economy)
-      const bowlerMatch = body.match(/([A-Z][a-zA-Z\s\.]+)\s+(\d+-\d+)\s*\((\d+\.?\d*)\)\s+([\d\.]+)/);
+      // 5. Bowler
+      const bowlerMatch = body.match(/([A-Z][a-zA-Z\s\.]+)\s+(\d+-\d+)\s*\((\d+\.?\d*)\)/);
       let bowler = { name: "Bowler", figures: "-", econ: "-" };
 
       if (bowlerMatch) {
+        const bName = bowlerMatch[1].trim().split("\n").pop();
+        const bFigs = `${bowlerMatch[2]} (${bowlerMatch[3]})`;
+
+        // Calculate accurate economy directly from figures (Runs / Overs)
+        let calcEcon = "-";
+        const runs = parseFloat(bowlerMatch[2].split("-")[1]);
+        const ovs = parseFloat(bowlerMatch[3]);
+        if (!isNaN(runs) && !isNaN(ovs) && ovs > 0) {
+          calcEcon = (runs / ovs).toFixed(2);
+        }
+
         bowler = {
-          name: bowlerMatch[1].trim().split("\n").pop(),
-          figures: `${bowlerMatch[2]} (${bowlerMatch[3]})`,
-          econ: bowlerMatch[4]
+          name: bName,
+          figures: bFigs,
+          econ: calcEcon
         };
       }
 
@@ -151,9 +172,9 @@ async function scrapeData() {
       };
     });
 
-    // Update cache only if valid data was found
-    if (extracted.score) cachedData.score = extracted.score;
-    if (extracted.overs) cachedData.overs = extracted.overs;
+    // Update state only with valid data
+    if (extracted.score && extracted.score !== "0/0") cachedData.score = extracted.score;
+    if (extracted.overs && extracted.overs !== "0.0") cachedData.overs = extracted.overs;
     if (extracted.team1) cachedData.team1 = extracted.team1;
     if (extracted.team2) cachedData.team2 = extracted.team2;
 
@@ -170,24 +191,18 @@ async function scrapeData() {
   }
 }
 
-// Start browser process
 initBrowser();
 
-// Health check endpoint
 app.get("/", (req, res) => {
   res.json({ status: "online", match: MATCH_URL });
 });
 
-// Primary scoreboard endpoint (always returns HTTP 200 with memory cache)
 app.get("/api/score", (req, res) => {
   res.status(200).json(cachedData);
 });
 
-// Graceful container shutdown
 process.on("SIGTERM", async () => {
-  if (browserInstance) {
-    await browserInstance.close().catch(() => {});
-  }
+  if (browserInstance) await browserInstance.close().catch(() => {});
   process.exit(0);
 });
 
