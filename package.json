@@ -3,7 +3,6 @@
   "version": "1.0.0",
   "main": "server.js",
   "scripts": {
-    "build": "npx playwright install --with-deps chromium",
     "start": "node server.js"
   },
   "dependencies": {
