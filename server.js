@@ -12,10 +12,10 @@ const MATCH_URL =
   "https://crex.com/cricket-live-score/ausw-a-vs-indw-a-3rd-odi-australia-a-women-tour-of-india-2026-match-updates-122G";
 
 let cachedData = {
-  team1: "INDW-A",
-  team2: "AUSW-A",
-  score: "218/5",
-  overs: "31.5",
+  team1: "-",
+  team2: "-",
+  score: "-",
+  overs: "-",
   crr: "-",
   rrr: "-",
   partnership: "-",
