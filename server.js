@@ -8,11 +8,12 @@ const PORT = process.env.PORT || 10000;
 app.use(cors({ origin: "*" }));
 app.use(express.json());
 
-// Default to KM vs PT (13VD)
+// Set default URL directly to KM vs PT (13VD)
 let activeMatchUrl =
+  process.env.CREX_MATCH_URL ||
   "https://crex.com/cricket-live-score/km-vs-pt-12th-match-odisha-t20-league-2026-match-updates-13VD";
 
-// Pre-populated with KM vs PT data so India Women never appears
+// Pre-set with clean initial values for KM vs PT
 let cachedData = {
   activeUrl: activeMatchUrl,
   team1: "KM",
@@ -38,10 +39,10 @@ let cachedData = {
 
 let browser = null;
 let page = null;
-let navigationLock = null;
+let isSwitching = false;
 
-async function initBrowser() {
-  try {
+async function getBrowser() {
+  if (!browser || !browser.isConnected()) {
     browser = await chromium.launch({
       headless: true,
       args: [
@@ -53,8 +54,20 @@ async function initBrowser() {
         "--single-process"
       ]
     });
+  }
+  return browser;
+}
 
-    const context = await browser.newContext({
+async function loadPage(targetUrl) {
+  try {
+    isSwitching = true;
+    const b = await getBrowser();
+
+    if (page) {
+      await page.close().catch(() => {});
+    }
+
+    const context = await b.newContext({
       userAgent:
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
       viewport: { width: 1280, height: 800 }
@@ -63,57 +76,19 @@ async function initBrowser() {
     page = await context.newPage();
     await page.route("**/*.{mp4,webm,woff,woff2,ttf,css}", (r) => r.abort());
 
-    console.log("Loading match:", activeMatchUrl);
-    await navigateAndScrape(activeMatchUrl);
-
-    // Background refresh every 3.5s
-    setInterval(async () => {
-      if (!navigationLock && page) {
-        await extractPageData();
-      }
-    }, 3500);
+    console.log("Connecting to:", targetUrl);
+    await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 35000 });
+    await page.waitForTimeout(3000);
+    await extractData();
   } catch (err) {
-    console.error("Browser launch error:", err.message);
-    setTimeout(initBrowser, 10000);
+    console.error("Navigation warning:", err.message);
+  } finally {
+    isSwitching = false;
   }
 }
 
-// Thread-safe navigation: multiple poll requests wait on the same promise
-async function navigateAndScrape(targetUrl) {
-  if (navigationLock) return navigationLock;
-
-  navigationLock = (async () => {
-    try {
-      // Clean and sanitize URL
-      let cleanUrl = targetUrl.trim().replace(/\.+$/, "");
-      if (!cleanUrl.startsWith("http")) {
-        cleanUrl = `https://crex.com/cricket-live-score/match-updates-${cleanUrl}`;
-      }
-
-      activeMatchUrl = cleanUrl;
-      console.log("Navigating to:", activeMatchUrl);
-
-      // Reset cache for new match
-      cachedData.activeUrl = activeMatchUrl;
-      cachedData.neededRuns = "Loading match data...";
-      cachedData.score = "-/-";
-
-      await page.goto(activeMatchUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
-      await page.waitForTimeout(3000);
-      await extractPageData();
-    } catch (err) {
-      console.error("Navigation error:", err.message);
-      cachedData.neededRuns = "Match not found on CREX";
-    } finally {
-      navigationLock = null;
-    }
-  })();
-
-  return navigationLock;
-}
-
-async function extractPageData() {
-  if (!page) return;
+async function extractData() {
+  if (!page || isSwitching) return;
 
   try {
     const extracted = await page.evaluate(() => {
@@ -150,7 +125,7 @@ async function extractPageData() {
         }
       }
 
-      // 2. Winner Banner / Match Situation
+      // 2. Winner / Match Equation
       let neededRuns = "";
       const wonMatch = body.match(/([A-Za-z0-9\-\s]+won\s+by\s+\d+\s+(?:runs|wickets)[^\n\.]*)/i);
       const tieMatch = body.match(/([A-Za-z0-9\-\s]+(?:Match tied|No result|Match abandoned)[^\n\.]*)/i);
@@ -168,8 +143,8 @@ async function extractPageData() {
       }
 
       // 3. Scores & Overs
-      let score = "-/-";
-      let overs = "0.0";
+      let score = "";
+      let overs = "";
       const scoreOverRegex = /(\b\d{1,3})[-\/](10|[0-9])\s*\(?([0-5]?\d\.[0-6])\)?/g;
       const allMatches = [...body.matchAll(scoreOverRegex)];
 
@@ -192,7 +167,7 @@ async function extractPageData() {
       }
       const lastTwoOvers = recentOvers.slice(-2);
 
-      // 5. Live Ball / Final Indicator
+      // 5. Live Ball
       let liveBall = "";
       if (wonMatch) {
         liveBall = "FT";
@@ -216,7 +191,7 @@ async function extractPageData() {
       const targetMatch = body.match(/Target\s*[:\n]?\s*(\d+)/i);
       if (targetMatch) {
         target = targetMatch[1];
-      } else if (needMatch && score !== "-/-") {
+      } else if (needMatch && score) {
         const runsNeed = needMatch[1].match(/need\s+(\d+)\s+runs/i);
         if (runsNeed) {
           target = String(parseInt(score.split("/")[0], 10) + parseInt(runsNeed[1], 10));
@@ -292,8 +267,8 @@ async function extractPageData() {
     if (extracted.team2) cachedData.team2 = extracted.team2;
     if (extracted.team1Logo) cachedData.team1Logo = extracted.team1Logo;
     if (extracted.team2Logo) cachedData.team2Logo = extracted.team2Logo;
-    if (extracted.score && extracted.score !== "-/-") cachedData.score = extracted.score;
-    if (extracted.overs && extracted.overs !== "0.0") cachedData.overs = extracted.overs;
+    if (extracted.score) cachedData.score = extracted.score;
+    if (extracted.overs) cachedData.overs = extracted.overs;
     if (extracted.liveBall) cachedData.liveBall = extracted.liveBall;
     if (extracted.neededRuns) cachedData.neededRuns = extracted.neededRuns;
     if (extracted.recentOvers && extracted.recentOvers.length > 0) cachedData.recentOvers = extracted.recentOvers;
@@ -307,23 +282,26 @@ async function extractPageData() {
     if (extracted.batter2.name !== "Batter 2") cachedData.batter2 = extracted.batter2;
     if (extracted.bowler.name !== "Bowler") cachedData.bowler = extracted.bowler;
   } catch (err) {
-    console.warn("Scraping warning:", err.message);
+    console.warn("Extraction tick:", err.message);
   }
 }
 
-initBrowser();
+// Start browser process
+loadPage(activeMatchUrl);
+setInterval(extractData, 3500);
 
 app.get("/", (req, res) => {
   res.json({ status: "online", activeMatchUrl });
 });
 
-// Awaits the navigation promise if URL changed, then returns fresh JSON
+// Primary Endpoint: accepts ?url=... and updates match
 app.get("/api/score", async (req, res) => {
   let reqUrl = req.query.url;
   if (reqUrl) {
     reqUrl = reqUrl.trim().replace(/\.+$/, "");
-    if (reqUrl !== activeMatchUrl) {
-      await navigateAndScrape(reqUrl);
+    if (reqUrl.startsWith("http") && reqUrl !== activeMatchUrl) {
+      activeMatchUrl = reqUrl;
+      await loadPage(activeMatchUrl);
     }
   }
   res.status(200).json(cachedData);
