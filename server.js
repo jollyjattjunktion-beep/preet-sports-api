@@ -177,7 +177,7 @@ async function scrape_crex_match(rawUrl) {
           liveAction = matchStatus;
         }
 
-        // 4. Team Score
+        // 4. Team Score (locked to CRR Proximity)
         let score = "-/-";
         let overs = "0.0";
         const scoreOverRegex = /(\b\d{1,3})[-\/](10|[0-9])\s*\(?([0-5]?\d\.[0-6])\)?/g;
@@ -250,25 +250,38 @@ async function scrape_crex_match(rawUrl) {
           }
         }
 
-        // 8. LAST WICKET & NEXT BATSMAN EXTRACTION
+        // 8. LAST WICKET WITH RUNS & BALLS (e.g., Anushka Sharma 58(42))
         let lastWicket = "-";
-        const lastWktMatch = body.match(/Last\s*Wkt\s*[:\s]+([A-Za-z\s\.\-]+(?:\s+\d+\s*\(\d+\))?)/i);
+        const lastWktMatch = body.match(/Last\s*Wkt\s*[:\s]*([A-Za-z\s\.\-]+?)\s*(\d+\s*(?:\([0-9]+\))?)/i);
         if (lastWktMatch) {
-          lastWicket = lastWktMatch[1].trim().replace(/\s+/g, " ");
-        }
-
-        let nextBatsman = "-";
-        const nextBatMatch = body.match(/(?:Next\s*(?:Batter|Batsman|Bat)|Yet\s*to\s*bat)\s*[:\s]+([A-Za-z\s\.\-]+)/i);
-        if (nextBatMatch) {
-          nextBatsman = nextBatMatch[1].trim().split(/[,;\n]/)[0].trim();
+          const wName = lastWktMatch[1].trim();
+          const wScore = lastWktMatch[2].trim();
+          lastWicket = `${wName} ${wScore}`;
         } else {
-          const nextEl = document.querySelector(".yet-to-bat, .next-batsman, .upcoming-batsman");
-          if (nextEl) {
-            nextBatsman = nextEl.innerText.trim().split(/[,;\n]/)[0].trim();
+          const lwEl = document.querySelector(".last-wkt, .last-wicket, [class*='last-wkt']");
+          if (lwEl && lwEl.innerText.trim()) {
+            lastWicket = lwEl.innerText.replace(/Last\s*Wkt\s*[:\s]*/i, "").trim().replace(/\s+/g, " ");
+          } else {
+            const fallbackWkt = body.match(/Last\s*Wkt\s*[:\s]*([A-Za-z0-9\s\.\-\(\)]+)/i);
+            if (fallbackWkt) {
+              lastWicket = fallbackWkt[1].trim().split(/\n|CRR|P'ship|Over/i)[0].trim().replace(/\s+/g, " ");
+            }
           }
         }
 
-        // 9. Batters
+        // 9. NEXT BATSMAN EXTRACTION
+        let nextBatsman = "-";
+        const nextBatMatch = body.match(/(?:Next\s*(?:Batter|Batsman|Bat)|Yet\s*to\s*bat)\s*[:\s]*([A-Za-z\s\.\-]+)/i);
+        if (nextBatMatch) {
+          nextBatsman = nextBatMatch[1].trim().split(/[,;\n]/)[0].trim();
+        } else {
+          const nextEl = document.querySelector(".yet-to-bat, .next-batsman, .upcoming-batsman, [class*='yet-to-bat']");
+          if (nextEl && nextEl.innerText.trim()) {
+            nextBatsman = nextEl.innerText.replace(/(?:Next\s*(?:Batter|Batsman|Bat)|Yet\s*to\s*bat)\s*[:\s]*/i, "").trim().split(/[,;\n]/)[0].trim();
+          }
+        }
+
+        // 10. Batters
         const batterMatches = [...body.matchAll(/([A-Z][a-zA-Z\s\.]+)\s*\*?\s+(\d+)\s*\(([0-9]+)\)/g)];
         let batter1 = { name: "Batter 1", score: "-", image: "" };
         let batter2 = { name: "Batter 2", score: "-", image: "" };
@@ -290,7 +303,7 @@ async function scrape_crex_match(rawUrl) {
           };
         }
 
-        // 10. Bowler
+        // 11. Bowler
         const bowlerMatch = body.match(/([A-Z][a-zA-Z\s\.]+)\s+(\d+-\d+)\s*\((\d+\.?\d*)\)/);
         let bowler = { name: "Bowler", figures: "-", econ: "-", image: "" };
 
@@ -356,7 +369,7 @@ async function scrape_crex_match(rawUrl) {
   return activeScrapePromise;
 }
 
-// ── API Routes (Preserved Exactly) ────────────────────────────────────────
+// ── API Routes ────────────────────────────────────────────────────────────
 
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok", service: "cricket-broadcast-scraper" });
