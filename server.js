@@ -14,7 +14,6 @@ const _match_registry = {};
 let _last_used_url =
   "https://crex.com/cricket-live-score/km-vs-pt-12th-match-odisha-t20-league-2026-match-updates-13VD";
 
-// Cache for live match cards harvested from crex.com/cricket-live-score
 let _live_matches_cache = [];
 const _team_logos = {};
 
@@ -89,7 +88,6 @@ async function getOverviewPage() {
   return overviewPageInstance;
 }
 
-// Harvest all live match cards from crex.com/cricket-live-score
 async function harvestFromLiveScoresPage() {
   const now = Date.now();
   if (now - lastOverviewHarvestTime < 45000 && _live_matches_cache.length > 0) {
@@ -132,11 +130,7 @@ async function harvestFromLiveScoresPage() {
           const t2 = parseRow(teamRows[1]);
 
           if (t1.name && t2.name) {
-            results.push({
-              href,
-              team1: t1,
-              team2: t2
-            });
+            results.push({ href, team1: t1, team2: t2 });
           }
         }
       });
@@ -149,10 +143,9 @@ async function harvestFromLiveScoresPage() {
         if (c.team1.name && c.team1.logo) _team_logos[c.team1.name] = c.team1.logo;
         if (c.team2.name && c.team2.logo) _team_logos[c.team2.name] = c.team2.logo;
       }
-      console.log(`[Overview] Synced ${cards.length} live matches from crex.com/cricket-live-score`);
     }
   } catch (err) {
-    console.warn("[Overview] Live overview harvest warning:", err.message);
+    console.warn("[Overview] Logo harvest warning:", err.message);
   }
 }
 
@@ -161,7 +154,6 @@ function findMatchLogosFromOverview(matchUrl, team1Name, team2Name) {
   const cleanUrl = (matchUrl || "").toLowerCase();
   const slug = cleanUrl.split("/").filter(Boolean).pop() || "";
 
-  // 1. Direct URL Slug Match
   for (const m of _live_matches_cache) {
     const cardSlug = (m.href || "").toLowerCase().split("/").filter(Boolean).pop() || "";
     if (slug && cardSlug && (slug.includes(cardSlug) || cardSlug.includes(slug))) {
@@ -169,7 +161,6 @@ function findMatchLogosFromOverview(matchUrl, team1Name, team2Name) {
     }
   }
 
-  // 2. Team Name Matching
   const t1 = (team1Name || "").toUpperCase();
   const t2 = (team2Name || "").toUpperCase();
   if (t1 && t2) {
@@ -182,7 +173,6 @@ function findMatchLogosFromOverview(matchUrl, team1Name, team2Name) {
       }
     }
   }
-
   return null;
 }
 
@@ -252,7 +242,6 @@ async function scrape_crex_match(rawUrl) {
           }
         }
 
-        // 2. Identify batting team logo accurately on current match page
         let liveTeamLogo = "";
         let liveTeamName = "";
         const inningBox = document.querySelector(".team-inning, .live-score-card, .team-score");
@@ -263,7 +252,7 @@ async function scrape_crex_match(rawUrl) {
           if (textMatch) liveTeamName = textMatch[1].toUpperCase();
         }
 
-        // 3. TARGET CREX RESULT BOX (4, 6, Leg Bye, Run Out, Wicket, Over, Lunch Break)
+        // 2. CREX Result Box
         let liveAction = "";
         const resultBoxEl = document.querySelector(".result-box, .team-result .result-box, div.result-box, .result-box span.font2");
         if (resultBoxEl) {
@@ -293,7 +282,7 @@ async function scrape_crex_match(rawUrl) {
           liveAction = matchStatus;
         }
 
-        // 4. Team Score (CRR Proximity)
+        // 3. Team Score
         let score = "-/-";
         let overs = "0.0";
         const scoreOverRegex = /(\b\d{1,3})[-\/](10|[0-9])\s*\(?([0-5]?\d\.[0-6])\)?/g;
@@ -324,7 +313,7 @@ async function scrape_crex_match(rawUrl) {
           overs = best[3];
         }
 
-        // 5. Recent Overs
+        // 4. Over Columns
         const recentOvers = [];
         const overBlocks = [...body.matchAll(/Over\s+(\d+)\s+([\s\S]*?)=\s*(\d+)/gi)];
         for (const ob of overBlocks) {
@@ -337,7 +326,6 @@ async function scrape_crex_match(rawUrl) {
         }
         const lastTwoOvers = recentOvers.slice(-2);
 
-        // 6. Live Ball
         let liveBall = "";
         if (lastTwoOvers.length > 0) {
           const latestOver = lastTwoOvers[lastTwoOvers.length - 1];
@@ -350,7 +338,7 @@ async function scrape_crex_match(rawUrl) {
           liveBall = centerBig ? centerBig[1] : "•";
         }
 
-        // 7. Stats Strip
+        // 5. Stats Strip
         const crrMatch = body.match(/CRR\s*[:\n]?\s*([\d\.]+)/i);
         const rrrMatch = body.match(/RRR\s*[:\n]?\s*([\d\.]+)/i);
         const partMatch = body.match(/(?:Partnership|P'ship)\s*[:\n]?\s*([0-9]+\s*\([0-9]+\))/i);
@@ -366,7 +354,7 @@ async function scrape_crex_match(rawUrl) {
           }
         }
 
-        // 8. LAST WICKET WITH RUNS & BALLS
+        // 6. Last Wicket & Next Batsman
         let lastWicket = "-";
         const lastWktMatch = body.match(/Last\s*Wkt\s*[:\s]*([A-Za-z\s\.\-]+?)\s*(\d+\s*(?:\([0-9]+\))?)/i);
         if (lastWktMatch) {
@@ -383,7 +371,6 @@ async function scrape_crex_match(rawUrl) {
           }
         }
 
-        // 9. NEXT BATSMAN
         let nextBatsman = "-";
         const nextBatMatch = body.match(/(?:Next\s*(?:Batter|Batsman|Bat)|Yet\s*to\s*bat)\s*[:\s]*([A-Za-z\s\.\-]+)/i);
         if (nextBatMatch) {
@@ -395,7 +382,7 @@ async function scrape_crex_match(rawUrl) {
           }
         }
 
-        // 10. Fetch 4s, 6s, and SR from Scorecard
+        // 7. Scorecard 4s, 6s, SR
         const scorecardBatters = {};
         try {
           const scRes = await fetch(scUrl);
@@ -433,10 +420,33 @@ async function scrape_crex_match(rawUrl) {
           return null;
         };
 
-        // 11. Batters
+        // 8. STRIKER DETECTION (LOOKS FOR BAT SVG / CIRCLE-STRIKE IN CREX DOM)
+        const checkIsOnStrike = (shortName) => {
+          if (!shortName) return false;
+          const lower = shortName.toLowerCase().trim();
+
+          const playingWrap = document.querySelector(".playing-batsmen-wrapper");
+          if (playingWrap) {
+            const ptnrBoxes = playingWrap.querySelectorAll(".batsmen-partnership, .player-profile, .live-player");
+            for (const box of ptnrBoxes) {
+              if (box.innerText.toLowerCase().includes(lower)) {
+                // Batsman with bat SVG or circle-strike beside them
+                const hasBat = box.querySelector("svg, [class*='strike'], img[src*='bat']");
+                if (hasBat) return true;
+              }
+            }
+          }
+
+          // Text check fallback
+          const starMatch = new RegExp(lower.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*\\*", "i");
+          if (starMatch.test(body)) return true;
+          return false;
+        };
+
+        // 9. Batters
         const batterMatches = [...body.matchAll(/([A-Z][a-zA-Z\s\.]+)\s*\*?\s+(\d+)\s*\(([0-9]+)\)/g)];
-        let batter1 = { name: "Batter 1", score: "-", fours: "0", sixes: "0", sr: "0.00", image: "" };
-        let batter2 = { name: "Batter 2", score: "-", fours: "0", sixes: "0", sr: "0.00", image: "" };
+        let batter1 = { name: "Batter 1", score: "-", fours: "0", sixes: "0", sr: "0.00", onStrike: false, image: "" };
+        let batter2 = { name: "Batter 2", score: "-", fours: "0", sixes: "0", sr: "0.00", onStrike: false, image: "" };
 
         if (batterMatches.length >= 1) {
           const b1Name = batterMatches[0][1].trim().split("\n").pop();
@@ -452,6 +462,7 @@ async function scrape_crex_match(rawUrl) {
             fours: scb1 ? scb1.fours : "0",
             sixes: scb1 ? scb1.sixes : "0",
             sr: scb1 ? scb1.sr : sr1,
+            onStrike: checkIsOnStrike(b1Name),
             image: findImageNearText(b1Name)
           };
         }
@@ -470,11 +481,19 @@ async function scrape_crex_match(rawUrl) {
             fours: scb2 ? scb2.fours : "0",
             sixes: scb2 ? scb2.sixes : "0",
             sr: scb2 ? scb2.sr : sr2,
+            onStrike: checkIsOnStrike(b2Name),
             image: findImageNearText(b2Name)
           };
         }
 
-        // 12. Bowler
+        // If neither was explicitly detected, default batter 1 as striker
+        if (!batter1.onStrike && !batter2.onStrike) {
+          batter1.onStrike = true;
+        } else if (batter1.onStrike && batter2.onStrike) {
+          batter2.onStrike = false;
+        }
+
+        // 10. Bowler
         const bowlerMatch = body.match(/([A-Z][a-zA-Z\s\.]+)\s+(\d+-\d+)\s*\((\d+\.?\d*)\)/);
         let bowler = { name: "Bowler", figures: "-", econ: "0.00", image: "" };
 
@@ -519,14 +538,12 @@ async function scrape_crex_match(rawUrl) {
         };
       }, scorecardUrl);
 
-      // Determine team names
       const urlTeams = extractTeamsFromUrl(url);
       if (!extracted.team1 && urlTeams?.team1) extracted.team1 = urlTeams.team1;
       if (!extracted.team2 && urlTeams?.team2) extracted.team2 = urlTeams.team2;
       extracted.team1 = extracted.team1 || urlTeams?.team1 || "TEAM 1";
       extracted.team2 = extracted.team2 || urlTeams?.team2 || "TEAM 2";
 
-      // 13. ACCURATE LOGO RESOLUTION USING CREX.COM/CRICKET-LIVE-SCORE
       let team1Logo = "";
       let team2Logo = "";
 
@@ -542,7 +559,6 @@ async function scrape_crex_match(rawUrl) {
         }
       }
 
-      // Fallbacks from global team cache
       if (!team1Logo && _team_logos[extracted.team1.toUpperCase()]) {
         team1Logo = _team_logos[extracted.team1.toUpperCase()];
       }
@@ -550,7 +566,6 @@ async function scrape_crex_match(rawUrl) {
         team2Logo = _team_logos[extracted.team2.toUpperCase()];
       }
 
-      // If one team is actively batting on the match page, pair its logo strictly to that team
       if (extracted.liveTeamLogo && extracted.liveTeamName) {
         if (extracted.liveTeamName === extracted.team1.toUpperCase()) {
           team1Logo = team1Logo || extracted.liveTeamLogo;
@@ -564,7 +579,6 @@ async function scrape_crex_match(rawUrl) {
       extracted.team1Logo = team1Logo;
       extracted.team2Logo = team2Logo;
 
-      // If either logo is still missing, schedule an overview sync
       if (!team1Logo || !team2Logo) {
         harvestFromLiveScoresPage().catch(() => {});
       }
@@ -583,7 +597,6 @@ async function scrape_crex_match(rawUrl) {
   return activeScrapePromise;
 }
 
-// Initial background harvest of crex.com/cricket-live-score
 setTimeout(harvestFromLiveScoresPage, 2500);
 setInterval(harvestFromLiveScoresPage, 60000);
 
