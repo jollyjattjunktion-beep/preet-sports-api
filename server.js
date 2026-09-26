@@ -595,7 +595,7 @@ async function scrape_crex_match(rawUrl) {
       extracted.team1Logo = team1Logo;
       extracted.team2Logo = team2Logo;
 
-      // 11. TWO-TEAM EXACT SCOREBOARD INNINGS LOGIC
+      // 11. ACCURATE TWO-TEAM INNINGS SCORE RESOLUTION
       const isSecondInnings = extracted.target && extracted.target !== "--";
       const liveTeam = (extracted.liveTeamName || "").toUpperCase();
       const t1Name = extracted.team1.toUpperCase();
@@ -611,35 +611,45 @@ async function scrape_crex_match(rawUrl) {
 
       if (isSecondInnings) {
         const firstInnRuns = parseInt(extracted.target, 10) - 1;
-        team1Score = t1CardScore || (isNaN(firstInnRuns) ? "1st Inn" : `${firstInnRuns}-10`);
-        team1Overs = t1CardOvers || "47.3";
-        team1Role = "BOWLING";
+        const needText = (extracted.neededRuns || "").toUpperCase();
+        const isTeam2Batting = needText.includes(t2Name) || liveTeam === t2Name;
 
-        team2Score = extracted.score;
-        team2Overs = extracted.overs;
-        team2Role = "BATTING";
+        if (isTeam2Batting) {
+          // Team 2 (e.g. OMA) is chasing/batting: their score is the live score
+          team2Score = extracted.score ? extracted.score.replace("/", "-") : (t2CardScore || "0-0");
+          team2Overs = extracted.overs || t2CardOvers || "0.0";
+          team2Role = "BATTING";
 
-        if (liveTeam === t1Name) {
-          team1Score = extracted.score;
-          team1Overs = extracted.overs;
+          // Team 1 (e.g. MUM) batted 1st and is now bowling
+          team1Score = t1CardScore || (isNaN(firstInnRuns) ? "1st Inn" : `${firstInnRuns}-10`);
+          team1Overs = t1CardOvers || "47.3";
+          team1Role = "BOWLING";
+        } else {
+          // Team 1 (e.g. MUM) is chasing/batting: their score is the live score
+          team1Score = extracted.score ? extracted.score.replace("/", "-") : (t1CardScore || "0-0");
+          team1Overs = extracted.overs || t1CardOvers || "0.0";
           team1Role = "BATTING";
 
+          // Team 2 (e.g. OMA) batted 1st
           team2Score = t2CardScore || (isNaN(firstInnRuns) ? "1st Inn" : `${firstInnRuns}-10`);
           team2Overs = t2CardOvers || "47.3";
           team2Role = "BOWLING";
         }
       } else {
-        if (liveTeam === t2Name) {
-          team2Score = extracted.score;
-          team2Overs = extracted.overs;
+        const tossText = (extracted.neededRuns || "").toUpperCase();
+        const isTeam2BattingFirst = tossText.includes(`${t2Name} OPT`) && tossText.includes("BAT");
+
+        if (isTeam2BattingFirst || liveTeam === t2Name) {
+          team2Score = extracted.score ? extracted.score.replace("/", "-") : "0-0";
+          team2Overs = extracted.overs || "0.0";
           team2Role = "BATTING";
 
           team1Score = t1CardScore || "0-0";
           team1Overs = t1CardOvers || "Yet to bat";
           team1Role = "BOWLING";
         } else {
-          team1Score = extracted.score;
-          team1Overs = extracted.overs;
+          team1Score = extracted.score ? extracted.score.replace("/", "-") : "0-0";
+          team1Overs = extracted.overs || "0.0";
           team1Role = "BATTING";
 
           team2Score = t2CardScore || "0-0";
@@ -677,7 +687,7 @@ async function scrape_crex_match(rawUrl) {
 setTimeout(harvestFromLiveScoresPage, 2500);
 setInterval(harvestFromLiveScoresPage, 60000);
 
-// ── API Routes ────────────────────────────────────────────────────────────
+// ── API Routes (Preserved Exactly) ────────────────────────────────────────
 
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok", service: "cricket-broadcast-scraper" });
