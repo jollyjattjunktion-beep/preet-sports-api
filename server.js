@@ -12,7 +12,7 @@ app.use(express.urlencoded({ extended: true }));
 
 const _match_registry = {};
 let _last_used_url =
-  "https://crex.com/cricket-live-score/mum-vs-oma-6th-match-oman-invitational-triangular-2026-match-updates-145Z";
+  "https://crex.com/cricket-live-score/km-vs-pt-12th-match-odisha-t20-league-2026-match-updates-13VD";
 
 let _live_matches_cache = [];
 const _team_logos = {};
@@ -37,12 +37,48 @@ function extractTeamsFromUrl(rawUrl) {
 }
 
 // ── In-Memory Fast Cache ──────────────────────────────────────────────────
-let _current_match_data = null;
-let isScrapingActive = false;
+let activeScrapePromise = null;
 let browserInstance = null;
 let matchPageInstance = null;
 let overviewPageInstance = null;
 let lastOverviewHarvestTime = 0;
+let isSwitchingMatch = false;
+
+// Default Clean Template for Immediate Memory Flushes
+function getFreshTemplate(targetUrl) {
+  const teams = extractTeamsFromUrl(targetUrl) || { team1: "TEAM 1", team2: "TEAM 2" };
+  return {
+    success: true,
+    team1: teams.team1,
+    team2: teams.team2,
+    team1Logo: _team_logos[teams.team1] || "",
+    team2Logo: _team_logos[teams.team2] || "",
+    team1Score: "-",
+    team1Overs: "0.0",
+    team1Role: "BOWLING",
+    team2Score: "-",
+    team2Overs: "0.0",
+    team2Role: "BATTING",
+    score: "-",
+    overs: "0.0",
+    liveBall: "•",
+    liveAction: "LIVE",
+    chaseEquation: "",
+    neededRuns: "Connecting...",
+    recentOvers: [],
+    crr: "--",
+    rrr: "--",
+    partnership: "--",
+    target: "--",
+    lastWicket: "-",
+    nextBatsman: "-",
+    batter1: { name: "Batter 1", score: "-", fours: "0", sixes: "0", sr: "0.00", onStrike: true, image: "" },
+    batter2: { name: "Batter 2", score: "-", fours: "0", sixes: "0", sr: "0.00", onStrike: false, image: "" },
+    bowler: { name: "Bowler", figures: "-", econ: "0.00", image: "" }
+  };
+}
+
+let activeMatchData = getFreshTemplate(_last_used_url);
 
 async function getBrowser() {
   if (!browserInstance || !browserInstance.isConnected()) {
@@ -89,7 +125,6 @@ async function getOverviewPage() {
   return overviewPageInstance;
 }
 
-// Harvest all live match cards from crex.com/cricket-live-score
 async function harvestFromLiveScoresPage() {
   const now = Date.now();
   if (now - lastOverviewHarvestTime < 45000 && _live_matches_cache.length > 0) {
@@ -101,10 +136,10 @@ async function harvestFromLiveScoresPage() {
     const p = await getOverviewPage();
     if (p.url() !== "https://crex.com/cricket-live-score") {
       await p.goto("https://crex.com/cricket-live-score", { waitUntil: "domcontentloaded", timeout: 30000 });
-      await p.waitForTimeout(1500);
+      await p.waitForTimeout(2000);
     } else {
-      await p.reload({ waitUntil: "domcontentloaded", timeout: 20000 });
-      await p.waitForTimeout(1000);
+      await p.reload({ waitUntil: "domcontentloaded", timeout: 25000 });
+      await p.waitForTimeout(1500);
     }
 
     const cards = await p.evaluate(() => {
@@ -154,7 +189,7 @@ async function harvestFromLiveScoresPage() {
       }
     }
   } catch (err) {
-    console.warn("[Overview] Logo harvest warning:", err.message);
+    console.warn("[Overview] Harvest warning:", err.message);
   }
 }
 
@@ -185,26 +220,16 @@ function findMatchLogosFromOverview(matchUrl, team1Name, team2Name) {
   return null;
 }
 
-// ── FAST BACKGROUND ENGINE: Runs every 2.5s to keep memory warm ─────────
-async function runScrapeCycle() {
-  if (isScrapingActive) return;
-  isScrapingActive = true;
+// ── FAST BACKGROUND SCRAPING LOOP (NON-BLOCKING) ─────────────────────────
+async function triggerLiveEvaluation() {
+  if (isSwitchingMatch || !matchPageInstance) return;
 
   try {
-    const url = _last_used_url.trim().replace(/\.+$/, "");
-    const page = await getMatchPage();
-
-    if (page.url() !== url) {
-      console.log(`[Scraper] Fast switching to: ${url}`);
-      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 35000 });
-      await page.waitForTimeout(2000);
-    }
-
+    const url = _last_used_url;
     const baseUrl = url.replace(/\/match-(?:updates|scorecard|info|live).*$/i, "");
     const scorecardUrl = baseUrl + "/match-scorecard";
 
-    const extracted = await page.evaluate(async (scUrl) => {
-      const getTxt = (sel) => document.querySelector(sel)?.innerText?.trim() || "";
+    const extracted = await matchPageInstance.evaluate(async (scUrl) => {
       const body = document.body.innerText;
 
       const findImageNearText = (name) => {
@@ -261,7 +286,7 @@ async function runScrapeCycle() {
         liveAction = resultBoxEl.innerText.trim();
       }
 
-      // 3. TARGET CHASE EQUATION (e.g., OMA need 197 runs in 265 balls)[cite: 23]
+      // 3. Exact Chase Equation
       let chaseEquation = "";
       const finalResultEl = document.querySelector(".final-result.comment, div.final-result, .final-result");
       if (finalResultEl) {
@@ -392,7 +417,7 @@ async function runScrapeCycle() {
         }
       }
 
-      // 8. Lightweight Scorecard Fetch
+      // 8. Scorecard Batting Data
       const scorecardBatters = {};
       try {
         const scRes = await fetch(scUrl);
@@ -599,7 +624,7 @@ async function runScrapeCycle() {
     extracted.team1Logo = team1Logo;
     extracted.team2Logo = team2Logo;
 
-    // 12. TEAM SCORE AND ROLE BINDING (PREVENTS INVERSION)[cite: 21]
+    // Accurate 2-Team Innings Logic
     const isSecondInnings = extracted.target && extracted.target !== "--";
     const liveTeam = (extracted.liveTeamName || "").toUpperCase();
     const t1Name = extracted.team1.toUpperCase();
@@ -667,40 +692,61 @@ async function runScrapeCycle() {
     extracted.team2Role = team2Role;
 
     extracted.success = true;
-    _current_match_data = extracted;
+    activeMatchData = extracted;
   } catch (err) {
-    console.error(`[Scraper] Fast engine tick warning:`, err.message);
-  } finally {
-    isScrapingActive = false;
+    console.warn("[Tick] Evaluation warning:", err.message);
   }
 }
 
-// Start continuous fast scraper loop (every 2.5 seconds)
-setInterval(runScrapeCycle, 2500);
-setTimeout(runScrapeCycle, 1500);
+// Dedicated function for zero-delay URL switching & instant memory flush
+async function switchMatchUrl(newUrl) {
+  const cleanUrl = newUrl.trim().replace(/\.+$/, "");
+  if (!cleanUrl.startsWith("http")) return;
 
-// Overview card synchronization (every 60 seconds)
-setTimeout(harvestFromLiveScoresPage, 3000);
+  console.log(`[Switch] Instant memory flush & switching to: ${cleanUrl}`);
+  _last_used_url = cleanUrl;
+
+  // Flush in-memory data instantly side-by-side
+  activeMatchData = getFreshTemplate(cleanUrl);
+  isSwitchingMatch = true;
+
+  try {
+    const page = await getMatchPage();
+    await page.goto(cleanUrl, { waitUntil: "domcontentloaded", timeout: 35000 });
+    await page.waitForTimeout(2000);
+    isSwitchingMatch = false;
+    await triggerLiveEvaluation();
+  } catch (err) {
+    console.error("[Switch] Navigation failed:", err.message);
+    isSwitchingMatch = false;
+  }
+}
+
+// ── BACKGROUND ENGINE INTERVALS ──────────────────────────────────────────
+// High-frequency live tick (every 1.5 seconds)
+setInterval(triggerLiveEvaluation, 1500);
+
+// Overview cards sync (every 60 seconds)
+setTimeout(harvestFromLiveScoresPage, 2500);
 setInterval(harvestFromLiveScoresPage, 60000);
 
-// ── FAST API ROUTES (Returns memory snapshot instantly in < 15ms) ────────
+// Initial match startup
+switchMatchUrl(_last_used_url);
+
+// ── API ROUTES (INSTANT MEMORY RETURN, 0ms STALL) ─────────────────────────
 
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok", service: "cricket-broadcast-scraper" });
 });
 
-// Switch match and flush old data immediately
 app.all("/api/default-url", async (req, res) => {
-  const new_url = req.body?.url || req.query?.url;
-  if (new_url && new_url.trim()) {
-    const clean = new_url.trim().replace(/\.+$/, "");
-    if (clean !== _last_used_url) {
-      _last_used_url = clean;
-      _current_match_data = null; // Instantly flush old match cache
-      console.log(`[Engine] Flushed old data. Active match now: ${_last_used_url}`);
-      runScrapeCycle();
+  if (req.method === "POST") {
+    const new_url = req.body?.url || req.query?.url;
+    if (new_url && new_url.trim()) {
+      switchMatchUrl(new_url.trim());
+      return res.json({ success: true, url: _last_used_url, data: activeMatchData });
     }
-    return res.json({ success: true, url: _last_used_url });
+    return res.status(400).json({ success: false, error: "No URL provided" });
   }
   res.json({ url: _last_used_url });
 });
@@ -710,9 +756,7 @@ app.post("/api/match", (req, res) => {
   if (!url) return res.status(400).json({ success: false, error: "No URL provided" });
   const match_id = _url_to_id(url);
   _match_registry[match_id] = url;
-  _last_used_url = url;
-  _current_match_data = null;
-  runScrapeCycle();
+  switchMatchUrl(url);
   res.json({ success: true, match_id, url });
 });
 
@@ -722,24 +766,30 @@ app.get("/api/match/:match_id", (req, res) => {
   res.status(404).json({ success: false, error: "Match ID not found" });
 });
 
-app.all("/api/scrape", (req, res) => {
-  let url = req.query?.url || req.body?.url;
-  if (url && url.toString().trim() !== _last_used_url) {
-    _last_used_url = url.toString().trim().replace(/\.+$/, "");
-    _current_match_data = null;
-    runScrapeCycle();
+app.get("/api/match/:match_id/scrape", async (req, res) => {
+  const url = _match_registry[req.params.match_id];
+  if (!url) return res.status(404).json({ success: false, error: "Match ID not found." });
+  if (url !== _last_used_url) {
+    switchMatchUrl(url);
   }
-  if (_current_match_data) {
-    return res.json(_current_match_data);
-  }
-  res.json({ success: true, message: "Syncing fresh match..." });
+  res.status(200).json(activeMatchData);
 });
 
-app.get("/api/score", (req, res) => {
-  if (_current_match_data) {
-    return res.json(_current_match_data);
+// Instant Return Endpoint (Zero Delay)
+app.all("/api/scrape", async (req, res) => {
+  let url = req.query?.url || req.body?.url;
+  if (url && url.toString().trim() && url.toString().trim() !== _last_used_url) {
+    switchMatchUrl(url.toString().trim());
   }
-  res.json({ success: true, message: "Syncing fresh match..." });
+  res.status(200).json(activeMatchData);
+});
+
+app.get("/api/score", async (req, res) => {
+  let url = req.query?.url;
+  if (url && url.trim() !== _last_used_url) {
+    switchMatchUrl(url.trim());
+  }
+  res.status(200).json(activeMatchData);
 });
 
 process.on("SIGTERM", async () => {
