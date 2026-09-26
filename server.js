@@ -28,7 +28,7 @@ function extractTeamsFromUrl(rawUrl) {
     if (match) {
       const t1 = match[1].toUpperCase();
       let t2Raw = match[2];
-      const t2Clean = t2Raw.split(/-(?:\d+|match|odi|t20|test|league|cup|tour|final|live|updates)/i)[0].toUpperCase();
+      const t2Clean = t2Raw.split(/-(?:\d+|match|odi|t20|test|league|cup|tour|final|live|updates|scorecard)/i)[0].toUpperCase();
       return { team1: t1, team2: t2Clean };
     }
   } catch (e) {}
@@ -39,7 +39,6 @@ const _scrape_cache = {};
 let activeScrapePromise = null;
 let browserInstance = null;
 let pageInstance = null;
-let lastLiveScoresHarvest = 0;
 
 async function getBrowser() {
   if (!browserInstance || !browserInstance.isConnected()) {
@@ -72,60 +71,6 @@ async function getPage() {
   return pageInstance;
 }
 
-async function harvestLogosFromLiveScoresPage() {
-  const now = Date.now();
-  if (now - lastLiveScoresHarvest < 90000) return;
-  lastLiveScoresHarvest = now;
-
-  try {
-    const browser = await getBrowser();
-    const context = await browser.newContext({
-      userAgent:
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-    });
-    const p = await context.newPage();
-    await p.route("**/*.{mp4,webm,woff,woff2,ttf,css}", (r) => r.abort());
-
-    await p.goto("https://crex.com/cricket-live-score", { waitUntil: "domcontentloaded", timeout: 25000 });
-    await p.waitForTimeout(2000);
-
-    const harvested = await p.evaluate(() => {
-      const map = {};
-      const liveCards = document.querySelectorAll(".live-c-w, [class*='live-card']");
-      liveCards.forEach((card) => {
-        const teamRows = card.querySelectorAll(".team-score, [class*='team-score']");
-        teamRows.forEach((row) => {
-          const img = row.querySelector("img");
-          const textMatch = row.innerText.trim().match(/^([A-Za-z0-9\-]+)/);
-          if (img && textMatch) {
-            const src = img.src || img.getAttribute("data-src") || "";
-            if (src && src.includes("/Teams/")) {
-              map[textMatch[1].toUpperCase()] = src;
-            }
-          }
-        });
-      });
-
-      document.querySelectorAll("img").forEach((img) => {
-        const s = img.src || img.getAttribute("data-src") || "";
-        const alt = (img.alt || img.getAttribute("title") || "").trim().toUpperCase();
-        if (s && s.includes("/Teams/") && alt && alt.length <= 15) {
-          map[alt] = s;
-        }
-      });
-
-      return map;
-    });
-
-    await p.close().catch(() => {});
-    await context.close().catch(() => {});
-
-    Object.assign(_team_logos, harvested);
-  } catch (err) {
-    console.warn("[Logos] Harvest warning:", err.message);
-  }
-}
-
 async function scrape_crex_match(rawUrl) {
   const url = rawUrl.trim().replace(/\.+$/, "");
 
@@ -148,7 +93,11 @@ async function scrape_crex_match(rawUrl) {
         await page.waitForTimeout(2500);
       }
 
-      const extracted = await page.evaluate(() => {
+      // Compute scorecard URL for complete team logos and 4s/6s stats
+      const baseUrl = url.replace(/\/match-(?:updates|scorecard|info|live).*$/i, "");
+      const scorecardUrl = baseUrl + "/match-scorecard";
+
+      const extracted = await page.evaluate(async (scUrl) => {
         const getTxt = (sel) => document.querySelector(sel)?.innerText?.trim() || "";
         const body = document.body.innerText;
 
@@ -171,7 +120,7 @@ async function scrape_crex_match(rawUrl) {
           return "";
         };
 
-        // 1. Team Logos from /Teams/ CDN
+        // 1. Team Logos from /Teams/ CDN on current page
         const teamImgs = Array.from(document.querySelectorAll("img")).filter((img) => {
           const s = img.src || img.getAttribute("data-src") || "";
           return s.includes("/Teams/") || (s.includes("Teams") && !s.includes("players") && !s.includes("svg"));
@@ -307,7 +256,7 @@ async function scrape_crex_match(rawUrl) {
           }
         }
 
-        // 8. LAST WICKET WITH RUNS & BALLS
+        // 8. LAST WICKET WITH RUNS & BALLS (e.g. Ayaz Khan 67(55))
         let lastWicket = "-";
         const lastWktMatch = body.match(/Last\s*Wkt\s*[:\s]*([A-Za-z\s\.\-]+?)\s*(\d+\s*(?:\([0-9]+\))?)/i);
         if (lastWktMatch) {
@@ -336,65 +285,105 @@ async function scrape_crex_match(rawUrl) {
           }
         }
 
-        // Helper to extract 4s, 6s, and Strike Rate for Batters
-        const extractBatterExtras = (bName, rStr, bStr) => {
-          let fours = "0";
-          let sixes = "0";
-          let sr = "0.00";
-          const r = parseFloat(rStr);
-          const b = parseFloat(bStr);
-          if (!isNaN(r) && !isNaN(b) && b > 0) {
-            sr = ((r / b) * 100).toFixed(2);
-          }
+        // 10. LIGHTWEIGHT SCORECARD HARVEST (FOR BOTH LOGOS & 4s, 6s, SR STATS)
+        let scDoc = document;
+        if (!window.location.href.includes("match-scorecard")) {
+          try {
+            const scRes = await fetch(scUrl);
+            if (scRes.ok) {
+              const scHtml = await scRes.text();
+              scDoc = new DOMParser().parseFromString(scHtml, "text/html");
+            }
+          } catch (e) {}
+        }
 
-          if (bName) {
-            const esc = bName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-            // Match pattern: Name ... Runs Balls 4s 6s SR
-            const m = body.match(new RegExp(esc + "[\\s\\S]*?(\\d+)\\s+(\\d+)\\s+(\\d+)\\s+(\\d+)\\s+([\\d\\.]+)", "i"));
-            if (m) {
-              fours = m[3];
-              sixes = m[4];
-              if (m[5]) sr = parseFloat(m[5]).toFixed(2);
+        // Harvest second team logo from scorecard if missing
+        if (!team2Logo) {
+          const scLogos = Array.from(scDoc.querySelectorAll("img"))
+            .map((img) => img.src || img.getAttribute("data-src") || "")
+            .filter((s) => s.includes("/Teams/"));
+          const unique = [...new Set(scLogos)];
+          if (unique.length >= 2) {
+            team1Logo = team1Logo || unique[0];
+            team2Logo = unique[1];
+          } else if (unique.length === 1 && unique[0] !== team1Logo) {
+            team2Logo = unique[0];
+          }
+        }
+
+        // Harvest Batting Table for exact 4s, 6s, and Strike Rate
+        const scorecardBatters = {};
+        scDoc.querySelectorAll("tr").forEach((tr) => {
+          const cells = Array.from(tr.querySelectorAll("td, th")).map((c) => c.innerText.trim());
+          if (cells.length >= 7) {
+            const bName = cells[0];
+            const r = cells[2];
+            const b = cells[3];
+            const fours = cells[4];
+            const sixes = cells[5];
+            const sr = cells[6];
+            if (bName && !isNaN(parseInt(r)) && !isNaN(parseInt(b))) {
+              scorecardBatters[bName.toLowerCase()] = { name: bName, runs: r, balls: b, fours, sixes, sr };
             }
           }
-          return { fours, sixes, sr };
+        });
+
+        const findScorecardBatter = (shortName) => {
+          if (!shortName) return null;
+          const s = shortName.toLowerCase().trim();
+          if (scorecardBatters[s]) return scorecardBatters[s];
+          const parts = s.split(/\s+/);
+          const lastName = parts[parts.length - 1];
+          for (const k in scorecardBatters) {
+            if (k.includes(lastName) || lastName.includes(k)) {
+              return scorecardBatters[k];
+            }
+          }
+          return null;
         };
 
-        // 10. Batters
+        // 11. Batters
         const batterMatches = [...body.matchAll(/([A-Z][a-zA-Z\s\.]+)\s*\*?\s+(\d+)\s*\(([0-9]+)\)/g)];
         let batter1 = { name: "Batter 1", score: "-", fours: "0", sixes: "0", sr: "0.00", image: "" };
         let batter2 = { name: "Batter 2", score: "-", fours: "0", sixes: "0", sr: "0.00", image: "" };
 
         if (batterMatches.length >= 1) {
           const b1Name = batterMatches[0][1].trim().split("\n").pop();
-          const b1Runs = batterMatches[0][2];
-          const b1Balls = batterMatches[0][3];
-          const b1Extra = extractBatterExtras(b1Name, b1Runs, b1Balls);
+          const b1R = batterMatches[0][2];
+          const b1B = batterMatches[0][3];
+          const scb1 = findScorecardBatter(b1Name);
+          let sr1 = "0.00";
+          if (parseFloat(b1B) > 0) sr1 = ((parseFloat(b1R) / parseFloat(b1B)) * 100).toFixed(2);
+
           batter1 = {
             name: b1Name,
-            score: `${b1Runs} (${b1Balls})`,
-            fours: b1Extra.fours,
-            sixes: b1Extra.sixes,
-            sr: b1Extra.sr,
+            score: `${b1R} (${b1B})`,
+            fours: scb1 ? scb1.fours : "0",
+            sixes: scb1 ? scb1.sixes : "0",
+            sr: scb1 ? scb1.sr : sr1,
             image: findImageNearText(b1Name)
           };
         }
+
         if (batterMatches.length >= 2) {
           const b2Name = batterMatches[1][1].trim().split("\n").pop();
-          const b2Runs = batterMatches[1][2];
-          const b2Balls = batterMatches[1][3];
-          const b2Extra = extractBatterExtras(b2Name, b2Runs, b2Balls);
+          const b2R = batterMatches[1][2];
+          const b2B = batterMatches[1][3];
+          const scb2 = findScorecardBatter(b2Name);
+          let sr2 = "0.00";
+          if (parseFloat(b2B) > 0) sr2 = ((parseFloat(b2R) / parseFloat(b2B)) * 100).toFixed(2);
+
           batter2 = {
             name: b2Name,
-            score: `${b2Runs} (${b2Balls})`,
-            fours: b2Extra.fours,
-            sixes: b2Extra.sixes,
-            sr: b2Extra.sr,
+            score: `${b2R} (${b2B})`,
+            fours: scb2 ? scb2.fours : "0",
+            sixes: scb2 ? scb2.sixes : "0",
+            sr: scb2 ? scb2.sr : sr2,
             image: findImageNearText(b2Name)
           };
         }
 
-        // 11. Bowler
+        // 12. Bowler
         const bowlerMatch = body.match(/([A-Z][a-zA-Z\s\.]+)\s+(\d+-\d+)\s*\((\d+\.?\d*)\)/);
         let bowler = { name: "Bowler", figures: "-", econ: "0.00", image: "" };
 
@@ -437,7 +426,7 @@ async function scrape_crex_match(rawUrl) {
           batter2,
           bowler
         };
-      });
+      }, scorecardUrl);
 
       const urlTeams = extractTeamsFromUrl(url);
       if (!extracted.team1 && urlTeams?.team1) extracted.team1 = urlTeams.team1;
@@ -456,10 +445,6 @@ async function scrape_crex_match(rawUrl) {
         extracted.team1Logo = _team_logos[extracted.team1.toUpperCase()];
       }
 
-      if (!extracted.team2Logo) {
-        harvestLogosFromLiveScoresPage().catch(() => {});
-      }
-
       extracted.success = true;
       _scrape_cache[url] = { timestamp: Date.now(), data: extracted };
       return extracted;
@@ -473,9 +458,6 @@ async function scrape_crex_match(rawUrl) {
 
   return activeScrapePromise;
 }
-
-setTimeout(harvestLogosFromLiveScoresPage, 4000);
-setInterval(harvestLogosFromLiveScoresPage, 180000);
 
 // ── API Routes (Preserved Exactly) ────────────────────────────────────────
 
