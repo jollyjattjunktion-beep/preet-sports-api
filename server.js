@@ -147,14 +147,20 @@ async function scrape_crex_match(rawUrl) {
           }
         }
 
-        // 3. Status, Breaks (Lunch Break, Tea Break, Stumps), Winner, Equation
-        let matchStatus = "";
+        // 3. TARGET THE CREX RESULT BOX (4, 6, Leg Bye, Run Out, Wicket, Over, Lunch Break)
+        let liveAction = "";
+        const resultBoxEl = document.querySelector(".result-box, .team-result .result-box, div.result-box, .result-box span.font2");
+        if (resultBoxEl) {
+          liveAction = resultBoxEl.innerText.trim();
+        }
+
+        // Status & Session breaks fallback
         const breakMatch = body.match(/\b(Lunch Break|Tea Break|Innings Break|Dinner Break|Drinks Break|Stumps(?: - Day \d+)?|Day \d+ - Stumps|Rain Delay|Rain stops play|Delayed by rain|Match delayed|Wet Outfield|Bad Light)\b/i);
         const wonMatch = body.match(/([A-Za-z0-9\-\s]+won\s+by\s+\d+\s+(?:runs|wickets)[^\n\.]*)/i);
         const tieMatch = body.match(/([A-Za-z0-9\-\s]+(?:Match tied|No result|Match abandoned)[^\n\.]*)/i);
         const needMatch = body.match(/([A-Za-z0-9\-]+\s+need\s+\d+\s+runs\s+in\s+\d+\s+balls)/i);
-        const trailLeadMatch = body.match(/([A-Za-z0-9\-\s]+(?:lead by|trail by)\s+\d+\s+runs[^\n\.]*)/i);
 
+        let matchStatus = "";
         if (breakMatch) {
           matchStatus = breakMatch[1].trim();
         } else if (wonMatch) {
@@ -163,14 +169,16 @@ async function scrape_crex_match(rawUrl) {
           matchStatus = tieMatch[1].trim();
         } else if (needMatch) {
           matchStatus = needMatch[1].trim();
-        } else if (trailLeadMatch) {
-          matchStatus = trailLeadMatch[1].trim();
         } else {
           const statusMatch = body.match(/([A-Za-z0-9\-\s]+(?:elected to|lead by|trail by|delayed|starts at|opt to)[^\n\.]+)/i);
           matchStatus = statusMatch ? statusMatch[1].trim() : "Match in Progress";
         }
 
-        // 4. Team Score (locked to CRR proximity)
+        if (!liveAction) {
+          liveAction = matchStatus;
+        }
+
+        // 4. Team Score (CRR Proximity)
         let score = "-/-";
         let overs = "0.0";
         const scoreOverRegex = /(\b\d{1,3})[-\/](10|[0-9])\s*\(?([0-5]?\d\.[0-6])\)?/g;
@@ -216,9 +224,7 @@ async function scrape_crex_match(rawUrl) {
 
         // 6. Live Ball
         let liveBall = "";
-        if (wonMatch) {
-          liveBall = "FT";
-        } else if (lastTwoOvers.length > 0) {
+        if (lastTwoOvers.length > 0) {
           const latestOver = lastTwoOvers[lastTwoOvers.length - 1];
           if (latestOver.balls.length > 0) {
             liveBall = latestOver.balls[latestOver.balls.length - 1];
@@ -297,8 +303,8 @@ async function scrape_crex_match(rawUrl) {
           score,
           overs,
           liveBall,
+          liveAction, // Contains .result-box (4, 6, Leg Bye, Run Out, Wicket, Over, etc.)
           neededRuns: matchStatus,
-          matchStatus,
           recentOvers: lastTwoOvers,
           crr: crrMatch ? crrMatch[1] : "--",
           rrr: rrrMatch ? rrrMatch[1] : "--",
@@ -330,6 +336,8 @@ async function scrape_crex_match(rawUrl) {
 
   return activeScrapePromise;
 }
+
+// ── API Routes (Preserved Exactly) ────────────────────────────────────────
 
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok", service: "cricket-broadcast-scraper" });
