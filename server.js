@@ -7,34 +7,38 @@ const PORT = process.env.PORT || 10000;
 
 app.use(cors({ origin: "*" }));
 
-const MATCH_URL =
-  process.env.CREX_MATCH_URL ||
-  "https://crex.com/cricket-live-score/ausw-a-vs-indw-a-3rd-odi-australia-a-women-tour-of-india-2026-match-updates-122G";
+// Known matches pre-mapped for instant switching
+const MATCH_URL_MAP = {
+  "122G": "https://crex.com/cricket-live-score/ausw-a-vs-indw-a-3rd-odi-australia-a-women-tour-of-india-2026-match-updates-122G",
+  "11AI": "https://crex.com/cricket-live-score/ind-vs-wi-1st-odi-west-indies-tour-of-india-2026-match-updates-11AI",
+  "VSV": "https://crex.com/cricket-live-score/eng-vs-sl-3rd-odi-sri-lanka-tour-of-england-2026-match-updates-VSV"
+};
+
+let currentMatchId = "11AI";
+let currentMatchUrl = MATCH_URL_MAP["11AI"];
 
 let cachedData = {
-  team1: "INDW-A",
+  team1: "IND",
   team1Logo: "",
-  team2: "AUSW-A",
+  team2: "WI",
   team2Logo: "",
-  score: "311/5",
-  overs: "41.4",
-  liveBall: "6",
-  neededRuns: "INDW-A need 52 runs in 50 balls",
-  recentOvers: [
-    { over: "41", balls: ["0", "4", "1", "0", "1", "1"], total: "7" },
-    { over: "42", balls: ["wd", "0", "1", "0", "6"], total: "8" }
-  ],
-  crr: "7.46",
-  rrr: "6.24",
-  partnership: "101(69)",
-  target: "363",
-  batter1: { name: "N Prasad", score: "75 (70)", image: "" },
-  batter2: { name: "M Mani", score: "59 (35)", image: "" },
-  bowler: { name: "H Silver-Holmes", figures: "0-56 (6.4)", econ: "8.40", image: "" }
+  score: "0/0",
+  overs: "0.0",
+  liveBall: "-",
+  neededRuns: "Connecting...",
+  recentOvers: [],
+  crr: "-",
+  rrr: "-",
+  partnership: "-",
+  target: "-",
+  batter1: { name: "Batter 1", score: "0 (0)", image: "" },
+  batter2: { name: "Batter 2", score: "0 (0)", image: "" },
+  bowler: { name: "Bowler", figures: "0-0 (0.0)", econ: "0.00", image: "" }
 };
 
 let browserInstance = null;
 let pageInstance = null;
+let isSwitching = false;
 
 async function initBrowser() {
   try {
@@ -59,27 +63,81 @@ async function initBrowser() {
     pageInstance = await context.newPage();
     await pageInstance.route("**/*.{mp4,webm,woff,woff2,ttf,css}", (route) => route.abort());
 
-    console.log("Connecting to CREX match...");
-    await pageInstance.goto(MATCH_URL, { waitUntil: "domcontentloaded", timeout: 45000 });
-    await pageInstance.waitForTimeout(3500);
+    console.log(`Initial navigation to match: ${currentMatchId}`);
+    await pageInstance.goto(currentMatchUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
+    await pageInstance.waitForTimeout(3000);
 
     scrapeData();
-    setInterval(scrapeData, 4000);
+    setInterval(scrapeData, 3500);
   } catch (err) {
     console.error("Browser launch error:", err.message);
     setTimeout(initBrowser, 10000);
   }
 }
 
+// Dynamically resolves an ID (e.g., 'VSV') to its full CREX URL
+async function switchMatch(targetId) {
+  if (!targetId || targetId === currentMatchId || isSwitching) return;
+  isSwitching = true;
+  targetId = targetId.trim().toUpperCase();
+
+  console.log(`Switching match to ID: ${targetId}`);
+
+  let targetUrl = MATCH_URL_MAP[targetId];
+
+  // If not in known list, find it automatically on CREX
+  if (!targetUrl && pageInstance) {
+    try {
+      await pageInstance.goto("https://crex.com/", { waitUntil: "domcontentloaded", timeout: 25000 });
+      await pageInstance.waitForTimeout(2000);
+
+      const foundUrl = await pageInstance.evaluate((id) => {
+        const links = Array.from(document.querySelectorAll("a[href*='cricket-live-score']"));
+        for (const a of links) {
+          if (a.href.toUpperCase().endsWith("-" + id) || a.href.toUpperCase().includes("-" + id + "-")) {
+            return a.href;
+          }
+        }
+        return null;
+      }, targetId);
+
+      if (foundUrl) {
+        targetUrl = foundUrl;
+        MATCH_URL_MAP[targetId] = targetUrl;
+      }
+    } catch (e) {
+      console.warn("Auto-discovery failed:", e.message);
+    }
+  }
+
+  // Fallback direct URL pattern if not found in list
+  if (!targetUrl) {
+    targetUrl = `https://crex.com/cricket-live-score/match-updates-${targetId}`;
+    MATCH_URL_MAP[targetId] = targetUrl;
+  }
+
+  currentMatchId = targetId;
+  currentMatchUrl = targetUrl;
+
+  try {
+    await pageInstance.goto(currentMatchUrl, { waitUntil: "domcontentloaded", timeout: 35000 });
+    await pageInstance.waitForTimeout(3000);
+    await scrapeData();
+  } catch (err) {
+    console.error(`Error opening match ${targetId}:`, err.message);
+  } finally {
+    isSwitching = false;
+  }
+}
+
 async function scrapeData() {
-  if (!pageInstance) return;
+  if (!pageInstance || isSwitching) return;
 
   try {
     const extracted = await pageInstance.evaluate(() => {
       const getTxt = (sel) => document.querySelector(sel)?.innerText?.trim() || "";
       const body = document.body.innerText;
 
-      // Image Finder Helper
       const findImageNearText = (name) => {
         if (!name || name.includes("Batter") || name.includes("Bowler")) return "";
         const all = Array.from(document.querySelectorAll("*")).filter(
@@ -100,8 +158,8 @@ async function scrapeData() {
       };
 
       // 1. Teams & Logos
-      const team1 = getTxt(".team1-name, .t-name:nth-of-type(1)") || "INDW-A";
-      const team2 = getTxt(".team2-name, .t-name:nth-of-type(2)") || "AUSW-A";
+      const team1 = getTxt(".team1-name, .t-name:nth-of-type(1)") || "TEAM 1";
+      const team2 = getTxt(".team2-name, .t-name:nth-of-type(2)") || "TEAM 2";
       const team1Logo = findImageNearText(team1);
       const team2Logo = findImageNearText(team2);
 
@@ -130,7 +188,7 @@ async function scrapeData() {
         overs = best[3];
       }
 
-      // 3. Needed Runs Equation
+      // 3. Match Situation
       let neededRuns = "";
       const needMatch = body.match(/([A-Za-z0-9\-]+\s+need\s+\d+\s+runs\s+in\s+\d+\s+balls)/i);
       if (needMatch) {
@@ -140,7 +198,7 @@ async function scrapeData() {
         neededRuns = statusMatch ? statusMatch[1].trim() : "Match in Progress";
       }
 
-      // 4. Parse Last Overs & Ball-by-Ball Columns
+      // 4. Recent Overs
       const recentOvers = [];
       const overBlocks = [...body.matchAll(/Over\s+(\d+)\s+([\s\S]*?)=\s*(\d+)/gi)];
       for (const ob of overBlocks) {
@@ -150,15 +208,11 @@ async function scrapeData() {
           .split(/\s+/)
           .filter((b) => b.length > 0 && !b.includes("Over") && b !== "=");
         const total = ob[3];
-        recentOvers.push({
-          over: overNum,
-          balls: rawBalls,
-          total: total
-        });
+        recentOvers.push({ over: overNum, balls: rawBalls, total: total });
       }
       const lastTwoOvers = recentOvers.slice(-2);
 
-      // 5. Live Ball Run in Middle Box
+      // 5. Live Ball
       let liveBall = "";
       if (lastTwoOvers.length > 0) {
         const latestOver = lastTwoOvers[lastTwoOvers.length - 1];
@@ -171,7 +225,7 @@ async function scrapeData() {
         liveBall = centerBig ? centerBig[1] : "•";
       }
 
-      // 6. CRR, RRR, Target, Partnership
+      // 6. Stats Strip
       const crrMatch = body.match(/CRR\s*[:\n]?\s*([\d\.]+)/i);
       const rrrMatch = body.match(/RRR\s*[:\n]?\s*([\d\.]+)/i);
       const partMatch = body.match(/(?:Partnership|P'ship)\s*[:\n]?\s*([0-9]+\s*\([0-9]+\))/i);
@@ -270,18 +324,23 @@ async function scrapeData() {
     if (extracted.batter2.name !== "Batter 2") cachedData.batter2 = extracted.batter2;
     if (extracted.bowler.name !== "Bowler") cachedData.bowler = extracted.bowler;
   } catch (err) {
-    console.warn("Scraping tick warning:", err.message);
+    console.warn("Scraping warning:", err.message);
   }
 }
 
 initBrowser();
 
 app.get("/", (req, res) => {
-  res.json({ status: "online", match: MATCH_URL });
+  res.json({ status: "online", activeMatch: currentMatchId, url: currentMatchUrl });
 });
 
-app.get("/api/score", (req, res) => {
-  res.status(200).json(cachedData);
+// Dynamic endpoint accepting ?id=11AI or ?id=VSV
+app.get("/api/score", async (req, res) => {
+  const reqId = req.query.id;
+  if (reqId && reqId.toUpperCase() !== currentMatchId) {
+    switchMatch(reqId);
+  }
+  res.status(200).json({ activeMatch: currentMatchId, ...cachedData });
 });
 
 process.on("SIGTERM", async () => {
