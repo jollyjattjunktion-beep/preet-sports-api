@@ -14,6 +14,8 @@ const _match_registry = {};
 let _last_used_url =
   "https://crex.com/cricket-live-score/km-vs-pt-12th-match-odisha-t20-league-2026-match-updates-13VD";
 
+// Cache for live match cards harvested from crex.com/cricket-live-score
+let _live_matches_cache = [];
 const _team_logos = {};
 
 function _url_to_id(url) {
@@ -38,7 +40,9 @@ function extractTeamsFromUrl(rawUrl) {
 const _scrape_cache = {};
 let activeScrapePromise = null;
 let browserInstance = null;
-let pageInstance = null;
+let matchPageInstance = null;
+let overviewPageInstance = null;
+let lastOverviewHarvestTime = 0;
 
 async function getBrowser() {
   if (!browserInstance || !browserInstance.isConnected()) {
@@ -57,18 +61,129 @@ async function getBrowser() {
   return browserInstance;
 }
 
-async function getPage() {
+async function getMatchPage() {
   const browser = await getBrowser();
-  if (!pageInstance || pageInstance.isClosed()) {
-    const context = await browser.newContext({
+  if (!matchPageInstance || matchPageInstance.isClosed()) {
+    const context = browser.contexts()[0] || (await browser.newContext({
       userAgent:
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
       viewport: { width: 1280, height: 800 }
-    });
-    pageInstance = await context.newPage();
-    await pageInstance.route("**/*.{mp4,webm,woff,woff2,ttf,css}", (r) => r.abort());
+    }));
+    matchPageInstance = await context.newPage();
+    await matchPageInstance.route("**/*.{mp4,webm,woff,woff2,ttf,css}", (r) => r.abort());
   }
-  return pageInstance;
+  return matchPageInstance;
+}
+
+async function getOverviewPage() {
+  const browser = await getBrowser();
+  if (!overviewPageInstance || overviewPageInstance.isClosed()) {
+    const context = browser.contexts()[0] || (await browser.newContext({
+      userAgent:
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+      viewport: { width: 1280, height: 800 }
+    }));
+    overviewPageInstance = await context.newPage();
+    await overviewPageInstance.route("**/*.{mp4,webm,woff,woff2,ttf,css}", (r) => r.abort());
+  }
+  return overviewPageInstance;
+}
+
+// Harvest all live match cards from crex.com/cricket-live-score
+async function harvestFromLiveScoresPage() {
+  const now = Date.now();
+  if (now - lastOverviewHarvestTime < 45000 && _live_matches_cache.length > 0) {
+    return;
+  }
+  lastOverviewHarvestTime = now;
+
+  try {
+    const p = await getOverviewPage();
+    if (p.url() !== "https://crex.com/cricket-live-score") {
+      await p.goto("https://crex.com/cricket-live-score", { waitUntil: "domcontentloaded", timeout: 30000 });
+      await p.waitForTimeout(2000);
+    } else {
+      await p.reload({ waitUntil: "domcontentloaded", timeout: 25000 });
+      await p.waitForTimeout(1500);
+    }
+
+    const cards = await p.evaluate(() => {
+      const results = [];
+      const cardNodes = document.querySelectorAll(".live-card-wrapper, .live-card, [class*='live-card']");
+      cardNodes.forEach((card) => {
+        const a = card.querySelector("a[href*='/cricket-live-score/']") || card.closest("a") || card.querySelector("a");
+        if (!a) return;
+        const href = a.getAttribute("href") || a.href || "";
+
+        const liveCw = card.querySelector(".live-c-w") || card;
+        const teamRows = liveCw.querySelectorAll(".team-score, [class*='team-score']");
+
+        if (teamRows.length >= 2) {
+          const parseRow = (row) => {
+            const img = row.querySelector("img");
+            const logo = img ? (img.src || img.getAttribute("data-src") || "") : "";
+            const rawText = row.innerText.trim();
+            const nameMatch = rawText.match(/^([A-Za-z0-9\-]+)/);
+            const name = nameMatch ? nameMatch[1].toUpperCase() : "";
+            return { name, logo };
+          };
+
+          const t1 = parseRow(teamRows[0]);
+          const t2 = parseRow(teamRows[1]);
+
+          if (t1.name && t2.name) {
+            results.push({
+              href,
+              team1: t1,
+              team2: t2
+            });
+          }
+        }
+      });
+      return results;
+    });
+
+    if (cards && cards.length > 0) {
+      _live_matches_cache = cards;
+      for (const c of cards) {
+        if (c.team1.name && c.team1.logo) _team_logos[c.team1.name] = c.team1.logo;
+        if (c.team2.name && c.team2.logo) _team_logos[c.team2.name] = c.team2.logo;
+      }
+      console.log(`[Overview] Synced ${cards.length} live matches from crex.com/cricket-live-score`);
+    }
+  } catch (err) {
+    console.warn("[Overview] Live overview harvest warning:", err.message);
+  }
+}
+
+function findMatchLogosFromOverview(matchUrl, team1Name, team2Name) {
+  if (!matchUrl && !team1Name) return null;
+  const cleanUrl = (matchUrl || "").toLowerCase();
+  const slug = cleanUrl.split("/").filter(Boolean).pop() || "";
+
+  // 1. Direct URL Slug Match
+  for (const m of _live_matches_cache) {
+    const cardSlug = (m.href || "").toLowerCase().split("/").filter(Boolean).pop() || "";
+    if (slug && cardSlug && (slug.includes(cardSlug) || cardSlug.includes(slug))) {
+      return m;
+    }
+  }
+
+  // 2. Team Name Matching
+  const t1 = (team1Name || "").toUpperCase();
+  const t2 = (team2Name || "").toUpperCase();
+  if (t1 && t2) {
+    for (const m of _live_matches_cache) {
+      if (
+        (m.team1.name === t1 && m.team2.name === t2) ||
+        (m.team1.name === t2 && m.team2.name === t1)
+      ) {
+        return m;
+      }
+    }
+  }
+
+  return null;
 }
 
 async function scrape_crex_match(rawUrl) {
@@ -85,7 +200,7 @@ async function scrape_crex_match(rawUrl) {
 
   activeScrapePromise = (async () => {
     try {
-      const page = await getPage();
+      const page = await getMatchPage();
 
       if (page.url() !== url) {
         console.log(`[Scraper] Navigating to: ${url}`);
@@ -93,7 +208,6 @@ async function scrape_crex_match(rawUrl) {
         await page.waitForTimeout(2500);
       }
 
-      // Compute scorecard URL for complete team logos and 4s/6s stats
       const baseUrl = url.replace(/\/match-(?:updates|scorecard|info|live).*$/i, "");
       const scorecardUrl = baseUrl + "/match-scorecard";
 
@@ -120,22 +234,7 @@ async function scrape_crex_match(rawUrl) {
           return "";
         };
 
-        // 1. Team Logos from /Teams/ CDN on current page
-        const teamImgs = Array.from(document.querySelectorAll("img")).filter((img) => {
-          const s = img.src || img.getAttribute("data-src") || "";
-          return s.includes("/Teams/") || (s.includes("Teams") && !s.includes("players") && !s.includes("svg"));
-        });
-
-        let team1Logo = "";
-        let team2Logo = "";
-        if (teamImgs.length >= 2) {
-          team1Logo = teamImgs[0].src || teamImgs[0].getAttribute("data-src") || "";
-          team2Logo = teamImgs[1].src || teamImgs[1].getAttribute("data-src") || "";
-        } else if (teamImgs.length === 1) {
-          team1Logo = teamImgs[0].src || teamImgs[0].getAttribute("data-src") || "";
-        }
-
-        // 2. Team Names
+        // 1. Team Names
         let team1 = "";
         let team2 = "";
         const titleMatch = document.title.match(/(?:Live\s*Score[:\s-]*)?([A-Za-z0-9\-]+)\s+(?:vs|Vs|VS|v|V)\s+([A-Za-z0-9\-]+)/i);
@@ -151,6 +250,17 @@ async function scrape_crex_match(rawUrl) {
             team1 = team1 || headerMatch[1].trim();
             team2 = team2 || headerMatch[2].trim();
           }
+        }
+
+        // 2. Identify batting team logo accurately on current match page
+        let liveTeamLogo = "";
+        let liveTeamName = "";
+        const inningBox = document.querySelector(".team-inning, .live-score-card, .team-score");
+        if (inningBox) {
+          const img = inningBox.querySelector("img");
+          if (img) liveTeamLogo = img.src || img.getAttribute("data-src") || "";
+          const textMatch = inningBox.innerText.trim().match(/^([A-Za-z0-9\-]+)/);
+          if (textMatch) liveTeamName = textMatch[1].toUpperCase();
         }
 
         // 3. TARGET CREX RESULT BOX (4, 6, Leg Bye, Run Out, Wicket, Over, Lunch Break)
@@ -183,7 +293,7 @@ async function scrape_crex_match(rawUrl) {
           liveAction = matchStatus;
         }
 
-        // 4. Team Score (locked to CRR Proximity)
+        // 4. Team Score (CRR Proximity)
         let score = "-/-";
         let overs = "0.0";
         const scoreOverRegex = /(\b\d{1,3})[-\/](10|[0-9])\s*\(?([0-5]?\d\.[0-6])\)?/g;
@@ -256,7 +366,7 @@ async function scrape_crex_match(rawUrl) {
           }
         }
 
-        // 8. LAST WICKET WITH RUNS & BALLS (e.g. Ayaz Khan 67(55))
+        // 8. LAST WICKET WITH RUNS & BALLS
         let lastWicket = "-";
         const lastWktMatch = body.match(/Last\s*Wkt\s*[:\s]*([A-Za-z\s\.\-]+?)\s*(\d+\s*(?:\([0-9]+\))?)/i);
         if (lastWktMatch) {
@@ -285,48 +395,29 @@ async function scrape_crex_match(rawUrl) {
           }
         }
 
-        // 10. LIGHTWEIGHT SCORECARD HARVEST (FOR BOTH LOGOS & 4s, 6s, SR STATS)
-        let scDoc = document;
-        if (!window.location.href.includes("match-scorecard")) {
-          try {
-            const scRes = await fetch(scUrl);
-            if (scRes.ok) {
-              const scHtml = await scRes.text();
-              scDoc = new DOMParser().parseFromString(scHtml, "text/html");
-            }
-          } catch (e) {}
-        }
-
-        // Harvest second team logo from scorecard if missing
-        if (!team2Logo) {
-          const scLogos = Array.from(scDoc.querySelectorAll("img"))
-            .map((img) => img.src || img.getAttribute("data-src") || "")
-            .filter((s) => s.includes("/Teams/"));
-          const unique = [...new Set(scLogos)];
-          if (unique.length >= 2) {
-            team1Logo = team1Logo || unique[0];
-            team2Logo = unique[1];
-          } else if (unique.length === 1 && unique[0] !== team1Logo) {
-            team2Logo = unique[0];
-          }
-        }
-
-        // Harvest Batting Table for exact 4s, 6s, and Strike Rate
+        // 10. Fetch 4s, 6s, and SR from Scorecard
         const scorecardBatters = {};
-        scDoc.querySelectorAll("tr").forEach((tr) => {
-          const cells = Array.from(tr.querySelectorAll("td, th")).map((c) => c.innerText.trim());
-          if (cells.length >= 7) {
-            const bName = cells[0];
-            const r = cells[2];
-            const b = cells[3];
-            const fours = cells[4];
-            const sixes = cells[5];
-            const sr = cells[6];
-            if (bName && !isNaN(parseInt(r)) && !isNaN(parseInt(b))) {
-              scorecardBatters[bName.toLowerCase()] = { name: bName, runs: r, balls: b, fours, sixes, sr };
-            }
+        try {
+          const scRes = await fetch(scUrl);
+          if (scRes.ok) {
+            const scHtml = await scRes.text();
+            const scDoc = new DOMParser().parseFromString(scHtml, "text/html");
+            scDoc.querySelectorAll("tr").forEach((tr) => {
+              const cells = Array.from(tr.querySelectorAll("td, th")).map((c) => c.innerText.trim());
+              if (cells.length >= 7) {
+                const bName = cells[0];
+                const r = cells[2];
+                const b = cells[3];
+                const fours = cells[4];
+                const sixes = cells[5];
+                const sr = cells[6];
+                if (bName && !isNaN(parseInt(r)) && !isNaN(parseInt(b))) {
+                  scorecardBatters[bName.toLowerCase()] = { name: bName, runs: r, balls: b, fours, sixes, sr };
+                }
+              }
+            });
           }
-        });
+        } catch (e) {}
 
         const findScorecardBatter = (shortName) => {
           if (!shortName) return null;
@@ -407,9 +498,9 @@ async function scrape_crex_match(rawUrl) {
 
         return {
           team1,
-          team1Logo,
           team2,
-          team2Logo,
+          liveTeamLogo,
+          liveTeamName,
           score,
           overs,
           liveBall,
@@ -428,21 +519,54 @@ async function scrape_crex_match(rawUrl) {
         };
       }, scorecardUrl);
 
+      // Determine team names
       const urlTeams = extractTeamsFromUrl(url);
       if (!extracted.team1 && urlTeams?.team1) extracted.team1 = urlTeams.team1;
       if (!extracted.team2 && urlTeams?.team2) extracted.team2 = urlTeams.team2;
-
       extracted.team1 = extracted.team1 || urlTeams?.team1 || "TEAM 1";
       extracted.team2 = extracted.team2 || urlTeams?.team2 || "TEAM 2";
 
-      if (extracted.team1Logo) _team_logos[extracted.team1.toUpperCase()] = extracted.team1Logo;
-      if (extracted.team2Logo) _team_logos[extracted.team2.toUpperCase()] = extracted.team2Logo;
+      // 13. ACCURATE LOGO RESOLUTION USING CREX.COM/CRICKET-LIVE-SCORE
+      let team1Logo = "";
+      let team2Logo = "";
 
-      if (!extracted.team2Logo && _team_logos[extracted.team2.toUpperCase()]) {
-        extracted.team2Logo = _team_logos[extracted.team2.toUpperCase()];
+      const matchOverview = findMatchLogosFromOverview(url, extracted.team1, extracted.team2);
+
+      if (matchOverview) {
+        if (matchOverview.team1.name === extracted.team1.toUpperCase()) {
+          team1Logo = matchOverview.team1.logo;
+          team2Logo = matchOverview.team2.logo;
+        } else if (matchOverview.team2.name === extracted.team1.toUpperCase()) {
+          team1Logo = matchOverview.team2.logo;
+          team2Logo = matchOverview.team1.logo;
+        }
       }
-      if (!extracted.team1Logo && _team_logos[extracted.team1.toUpperCase()]) {
-        extracted.team1Logo = _team_logos[extracted.team1.toUpperCase()];
+
+      // Fallbacks from global team cache
+      if (!team1Logo && _team_logos[extracted.team1.toUpperCase()]) {
+        team1Logo = _team_logos[extracted.team1.toUpperCase()];
+      }
+      if (!team2Logo && _team_logos[extracted.team2.toUpperCase()]) {
+        team2Logo = _team_logos[extracted.team2.toUpperCase()];
+      }
+
+      // If one team is actively batting on the match page, pair its logo strictly to that team
+      if (extracted.liveTeamLogo && extracted.liveTeamName) {
+        if (extracted.liveTeamName === extracted.team1.toUpperCase()) {
+          team1Logo = team1Logo || extracted.liveTeamLogo;
+          _team_logos[extracted.team1.toUpperCase()] = team1Logo;
+        } else if (extracted.liveTeamName === extracted.team2.toUpperCase()) {
+          team2Logo = team2Logo || extracted.liveTeamLogo;
+          _team_logos[extracted.team2.toUpperCase()] = team2Logo;
+        }
+      }
+
+      extracted.team1Logo = team1Logo;
+      extracted.team2Logo = team2Logo;
+
+      // If either logo is still missing, schedule an overview sync
+      if (!team1Logo || !team2Logo) {
+        harvestFromLiveScoresPage().catch(() => {});
       }
 
       extracted.success = true;
@@ -458,6 +582,10 @@ async function scrape_crex_match(rawUrl) {
 
   return activeScrapePromise;
 }
+
+// Initial background harvest of crex.com/cricket-live-score
+setTimeout(harvestFromLiveScoresPage, 2500);
+setInterval(harvestFromLiveScoresPage, 60000);
 
 // ── API Routes (Preserved Exactly) ────────────────────────────────────────
 
