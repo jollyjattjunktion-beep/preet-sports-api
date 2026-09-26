@@ -7,7 +7,7 @@ const PORT = process.env.PORT || 10000;
 
 app.use(cors({ origin: "*" }));
 
-// Match ID to full CREX URL dictionary
+// Match Registry with pre-mapped slugs
 const MATCH_REGISTRY = {
   "13VD": "https://crex.com/cricket-live-score/km-vs-pt-12th-match-odisha-t20-league-2026-match-updates-13VD",
   "11AI": "https://crex.com/cricket-live-score/ind-vs-wi-1st-odi-west-indies-tour-of-india-2026-match-updates-11AI",
@@ -21,28 +21,29 @@ let isNavigating = false;
 
 let cachedData = {
   activeMatchId: "13VD",
+  status: "Connecting...",
   team1: "KM",
   team1Logo: "",
   team2: "PT",
   team2Logo: "",
-  score: "-/-",
+  score: "0/0",
   overs: "0.0",
-  liveBall: "-",
-  neededRuns: "Loading match data...",
+  liveBall: "•",
+  neededRuns: "Connecting to match 13VD...",
   recentOvers: [],
   crr: "-",
   rrr: "-",
   partnership: "-",
   target: "-",
-  batter1: { name: "Batter 1", score: "-", image: "" },
-  batter2: { name: "Batter 2", score: "-", image: "" },
-  bowler: { name: "Bowler", figures: "-", econ: "-", image: "" }
+  batter1: { name: "Batter 1", score: "0 (0)", image: "" },
+  batter2: { name: "Batter 2", score: "0 (0)", image: "" },
+  bowler: { name: "Bowler", figures: "0-0 (0.0)", econ: "0.00", image: "" }
 };
 
 let browser = null;
 let page = null;
 
-async function initScraper() {
+async function initBrowser() {
   try {
     browser = await chromium.launch({
       headless: true,
@@ -57,11 +58,13 @@ async function initScraper() {
     });
 
     const context = await browser.newContext({
-      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+      userAgent:
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
       viewport: { width: 1280, height: 800 }
     });
 
     page = await context.newPage();
+    // Block video/fonts to preserve 512MB RAM limit
     await page.route("**/*.{mp4,webm,woff,woff2,ttf,css}", (r) => r.abort());
 
     console.log(`Connecting to initial match: ${currentMatchId}`);
@@ -71,45 +74,33 @@ async function initScraper() {
     scrapeActiveMatch();
     setInterval(scrapeActiveMatch, 3500);
   } catch (err) {
-    console.error("Initialization error:", err.message);
-    setTimeout(initScraper, 10000);
+    console.error("Browser launch error:", err.message);
+    setTimeout(initBrowser, 10000);
   }
 }
 
-// Dynamically resolves any CREX ID to its exact URL
-async function resolveAndSwitchMatch(targetId) {
-  targetId = targetId.trim().toUpperCase();
-  if (isNavigating) return;
+async function resolveAndSwitchMatch(targetInput) {
+  if (!targetInput || isNavigating) return;
   isNavigating = true;
 
-  console.log(`Resolving match ID: ${targetId}`);
+  let targetId = targetInput.trim();
+  let targetUrl = "";
 
-  // 1. Instantly flush old score cache to avoid showing previous match numbers
-  cachedData = {
-    activeMatchId: targetId,
-    team1: "...",
-    team1Logo: "",
-    team2: "...",
-    team2Logo: "",
-    score: "-/-",
-    overs: "0.0",
-    liveBall: "-",
-    neededRuns: `Switching to ${targetId}...`,
-    recentOvers: [],
-    crr: "-",
-    rrr: "-",
-    partnership: "-",
-    target: "-",
-    batter1: { name: "Batter 1", score: "-", image: "" },
-    batter2: { name: "Batter 2", score: "-", image: "" },
-    bowler: { name: "Bowler", figures: "-", econ: "-", image: "" }
-  };
+  // Check if user passed full URL or just the ID
+  if (targetId.startsWith("http://") || targetId.startsWith("https://")) {
+    targetUrl = targetId;
+    const idMatch = targetUrl.match(/-([a-zA-Z0-9]+)$/);
+    targetId = idMatch ? idMatch[1].toUpperCase() : "LIVE";
+    MATCH_REGISTRY[targetId] = targetUrl;
+  } else {
+    targetId = targetId.toUpperCase();
+    targetUrl = MATCH_REGISTRY[targetId];
+  }
 
-  let targetUrl = MATCH_REGISTRY[targetId];
-
-  // 2. If ID isn't in memory, search CREX live fixtures for the link ending in this ID
+  // Auto-find URL on CREX fixtures if not registered
   if (!targetUrl && page) {
     try {
+      console.log(`Searching CREX fixtures for ID: ${targetId}...`);
       await page.goto("https://crex.com/fixtures", { waitUntil: "domcontentloaded", timeout: 25000 });
       await page.waitForTimeout(2000);
 
@@ -124,11 +115,11 @@ async function resolveAndSwitchMatch(targetId) {
 
       if (targetUrl) MATCH_REGISTRY[targetId] = targetUrl;
     } catch (e) {
-      console.warn("Crawler fixture search warning:", e.message);
+      console.warn("Fixture lookup warning:", e.message);
     }
   }
 
-  // 3. Fallback direct format
+  // Direct fallback
   if (!targetUrl) {
     targetUrl = `https://crex.com/cricket-live-score/match-updates-${targetId}`;
     MATCH_REGISTRY[targetId] = targetUrl;
@@ -136,15 +127,17 @@ async function resolveAndSwitchMatch(targetId) {
 
   currentMatchId = targetId;
   currentMatchUrl = targetUrl;
+  cachedData.activeMatchId = targetId;
+  cachedData.neededRuns = `Loading match ${targetId}...`;
 
   try {
-    console.log(`Loading match URL: ${currentMatchUrl}`);
+    console.log(`Navigating to: ${currentMatchUrl}`);
     await page.goto(currentMatchUrl, { waitUntil: "domcontentloaded", timeout: 35000 });
     await page.waitForTimeout(3000);
     await scrapeActiveMatch();
   } catch (err) {
     console.error(`Failed to load ${targetId}:`, err.message);
-    cachedData.neededRuns = `Could not load match ${targetId}`;
+    cachedData.neededRuns = `Could not load ${targetId}`;
   } finally {
     isNavigating = false;
   }
@@ -158,74 +151,70 @@ async function scrapeActiveMatch() {
       const getTxt = (sel) => document.querySelector(sel)?.innerText?.trim() || "";
       const body = document.body.innerText;
 
-      // Extract Team Names from Header or Title
-      let team1 = getTxt(".team1-name, .t-name:nth-of-type(1)");
-      let team2 = getTxt(".team2-name, .t-name:nth-of-type(2)");
+      // 1. Teams (multi-selector fallback)
+      let t1 = getTxt(".team1-name, .t-name:nth-of-type(1), .match-header .team:nth-child(1)");
+      let t2 = getTxt(".team2-name, .t-name:nth-of-type(2), .match-header .team:nth-child(2)");
 
-      if (!team1 || !team2) {
+      if (!t1 || !t2) {
         const titleMatch = document.title.match(/([A-Za-z0-9\-]+)\s+vs\s+([A-Za-z0-9\-]+)/i);
         if (titleMatch) {
-          team1 = team1 || titleMatch[1];
-          team2 = team2 || titleMatch[2];
+          t1 = t1 || titleMatch[1];
+          t2 = t2 || titleMatch[2];
         }
       }
 
-      // Helper for player headshots & team logos
+      // Helper for photos & flags
       const findImage = (name) => {
         if (!name || name.includes("Batter") || name.includes("Bowler")) return "";
         const all = Array.from(document.querySelectorAll("*")).filter(
           (el) => el.children.length === 0 && el.textContent.trim().toLowerCase() === name.toLowerCase()
         );
         for (const el of all) {
-          let parent = el.parentElement;
-          for (let i = 0; i < 5 && parent; i++) {
-            const img = parent.querySelector("img");
+          let p = el.parentElement;
+          for (let i = 0; i < 5 && p; i++) {
+            const img = p.querySelector("img");
             if (img) {
               const src = img.src || img.getAttribute("data-src") || "";
               if (src && !src.includes("data:image/svg") && !src.includes("icon")) return src;
             }
-            parent = parent.parentElement;
+            p = p.parentElement;
           }
         }
         return "";
       };
 
-      // Clean Score & Overs Extraction
+      // 2. Score & Overs (Handles Live, Break, & Finished matches)
       let score = "";
       let overs = "";
-      const scoreOverRegex = /(\b\d{1,3})[-\/](10|[0-9])\s*\(?([0-5]?\d\.[0-6])\)?/g;
-      const allMatches = [...body.matchAll(scoreOverRegex)];
 
-      if (allMatches.length > 0) {
-        const crrPos = body.indexOf("CRR");
-        let best = allMatches[0];
-        if (crrPos !== -1) {
-          let minDiff = 999999;
-          for (const m of allMatches) {
-            const diff = Math.abs(m.index - crrPos);
-            if (diff < minDiff) {
-              minDiff = diff;
-              best = m;
-            }
-          }
-        } else {
-          best = allMatches[allMatches.length - 1];
+      const scoreMatches = [...body.matchAll(/(\b\d{1,3})[-\/](10|[0-9])\s*\(?([0-5]?\d\.[0-6])\)?/g)];
+      if (scoreMatches.length > 0) {
+        const last = scoreMatches[scoreMatches.length - 1];
+        score = `${last[1]}/${last[2]}`;
+        overs = last[3];
+      } else {
+        // Fallback for matches formatted as "145/6 (20.0)"
+        const singleScore = body.match(/(\d{1,3}[\/-]\d{1,2})\s*\((\d{1,2}\.\d)\)/);
+        if (singleScore) {
+          score = singleScore[1].replace("-", "/");
+          overs = singleScore[2];
         }
-        score = `${best[1]}/${best[2]}`;
-        overs = best[3];
       }
 
-      // Equation / Match Status
+      // 3. Match Situation / Result
       let neededRuns = "";
       const needMatch = body.match(/([A-Za-z0-9\-]+\s+need\s+\d+\s+runs\s+in\s+\d+\s+balls)/i);
+      const resultMatch = body.match(/([A-Za-z0-9\-\s]+(?:won by|elected to|lead by|trail by|won the match)[^\n\.]+)/i);
+
       if (needMatch) {
         neededRuns = needMatch[1].trim();
+      } else if (resultMatch) {
+        neededRuns = resultMatch[1].trim();
       } else {
-        const statusMatch = body.match(/([A-Za-z0-9\-\s]+(?:won by|elected to|lead by|trail by|starts at|delayed)[^\n\.]+)/i);
-        neededRuns = statusMatch ? statusMatch[1].trim() : "Match in Progress";
+        neededRuns = "Match in Progress";
       }
 
-      // Last Overs
+      // 4. Over-by-Over Columns
       const recentOvers = [];
       const overBlocks = [...body.matchAll(/Over\s+(\d+)\s+([\s\S]*?)=\s*(\d+)/gi)];
       for (const ob of overBlocks) {
@@ -239,7 +228,7 @@ async function scrapeActiveMatch() {
       }
       const lastTwoOvers = recentOvers.slice(-2);
 
-      // Live Run
+      // 5. Live Ball
       let liveBall = "";
       if (lastTwoOvers.length > 0) {
         const latestOver = lastTwoOvers[lastTwoOvers.length - 1];
@@ -252,7 +241,7 @@ async function scrapeActiveMatch() {
         liveBall = centerBig ? centerBig[1] : "•";
       }
 
-      // Stats
+      // 6. Stats Strip
       const crrMatch = body.match(/CRR\s*[:\n]?\s*([\d\.]+)/i);
       const rrrMatch = body.match(/RRR\s*[:\n]?\s*([\d\.]+)/i);
       const partMatch = body.match(/(?:Partnership|P'ship)\s*[:\n]?\s*([0-9]+\s*\([0-9]+\))/i);
@@ -268,10 +257,10 @@ async function scrapeActiveMatch() {
         }
       }
 
-      // Batters
+      // 7. Batters
       const batterMatches = [...body.matchAll(/([A-Z][a-zA-Z\s\.]+)\s*\*?\s+(\d+)\s*\(([0-9]+)\)/g)];
-      let batter1 = { name: "Batter 1", score: "-", image: "" };
-      let batter2 = { name: "Batter 2", score: "-", image: "" };
+      let batter1 = { name: "Batter 1", score: "0 (0)", image: "" };
+      let batter2 = { name: "Batter 2", score: "0 (0)", image: "" };
 
       if (batterMatches.length >= 1) {
         const b1Name = batterMatches[0][1].trim().split("\n").pop();
@@ -290,14 +279,14 @@ async function scrapeActiveMatch() {
         };
       }
 
-      // Bowler
+      // 8. Bowler
       const bowlerMatch = body.match(/([A-Z][a-zA-Z\s\.]+)\s+(\d+-\d+)\s*\((\d+\.?\d*)\)/);
-      let bowler = { name: "Bowler", figures: "-", econ: "-", image: "" };
+      let bowler = { name: "Bowler", figures: "0-0 (0.0)", econ: "0.00", image: "" };
 
       if (bowlerMatch) {
         const bName = bowlerMatch[1].trim().split("\n").pop();
         const bFigs = `${bowlerMatch[2]} (${bowlerMatch[3]})`;
-        let calcEcon = "-";
+        let calcEcon = "0.00";
         const runs = parseFloat(bowlerMatch[2].split("-")[1]);
         const ovs = parseFloat(bowlerMatch[3]);
         if (!isNaN(runs) && !isNaN(ovs) && ovs > 0) {
@@ -313,12 +302,12 @@ async function scrapeActiveMatch() {
       }
 
       return {
-        team1: team1 || "KM",
-        team1Logo: findImage(team1),
-        team2: team2 || "PT",
-        team2Logo: findImage(team2),
-        score,
-        overs,
+        team1: t1 || "KM",
+        team1Logo: findImage(t1),
+        team2: t2 || "PT",
+        team2Logo: findImage(t2),
+        score: score || "0/0",
+        overs: overs || "0.0",
         liveBall,
         neededRuns,
         recentOvers: lastTwoOvers,
@@ -332,42 +321,27 @@ async function scrapeActiveMatch() {
       };
     });
 
-    cachedData.activeMatchId = currentMatchId;
-    if (extracted.team1) cachedData.team1 = extracted.team1;
-    if (extracted.team2) cachedData.team2 = extracted.team2;
-    if (extracted.team1Logo) cachedData.team1Logo = extracted.team1Logo;
-    if (extracted.team2Logo) cachedData.team2Logo = extracted.team2Logo;
-
-    if (extracted.score) cachedData.score = extracted.score;
-    if (extracted.overs) cachedData.overs = extracted.overs;
-    if (extracted.liveBall) cachedData.liveBall = extracted.liveBall;
-    if (extracted.neededRuns) cachedData.neededRuns = extracted.neededRuns;
-    if (extracted.recentOvers) cachedData.recentOvers = extracted.recentOvers;
-
-    cachedData.crr = extracted.crr;
-    cachedData.rrr = extracted.rrr;
-    cachedData.target = extracted.target;
-    cachedData.partnership = extracted.partnership;
-
-    if (extracted.batter1.name !== "Batter 1") cachedData.batter1 = extracted.batter1;
-    if (extracted.batter2.name !== "Batter 2") cachedData.batter2 = extracted.batter2;
-    if (extracted.bowler.name !== "Bowler") cachedData.bowler = extracted.bowler;
+    cachedData = {
+      activeMatchId: currentMatchId,
+      status: "LIVE",
+      ...extracted
+    };
   } catch (err) {
-    console.warn("Scraping warning:", err.message);
+    console.warn("Scraping tick warning:", err.message);
   }
 }
 
-initScraper();
+initBrowser();
 
 app.get("/", (req, res) => {
   res.json({ status: "online", activeMatch: currentMatchId, url: currentMatchUrl });
 });
 
-// Awaits switch before returning JSON so the frontend receives the new match right away
-app.get("/api/score", async (req, res) => {
-  const reqId = req.query.id;
-  if (reqId && reqId.toUpperCase() !== currentMatchId) {
-    await resolveAndSwitchMatch(reqId);
+// Non-blocking endpoint accepting ?id=13VD or full url ?url=https://crex.com/...
+app.get("/api/score", (req, res) => {
+  const reqTarget = req.query.id || req.query.url;
+  if (reqTarget && reqTarget.toUpperCase() !== currentMatchId) {
+    resolveAndSwitchMatch(reqTarget);
   }
   res.status(200).json(cachedData);
 });
