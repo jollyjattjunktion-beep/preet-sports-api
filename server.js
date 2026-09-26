@@ -14,7 +14,6 @@ const _match_registry = {};
 let _last_used_url =
   "https://crex.com/cricket-live-score/km-vs-pt-12th-match-odisha-t20-league-2026-match-updates-13VD";
 
-// Global team logo cache mapping team names/abbreviations to their /Teams/ vector URLs
 const _team_logos = {};
 
 function _url_to_id(url) {
@@ -73,10 +72,9 @@ async function getPage() {
   return pageInstance;
 }
 
-// Harvests both team logos from div.live-c-w on crex.com/cricket-live-score
 async function harvestLogosFromLiveScoresPage() {
   const now = Date.now();
-  if (now - lastLiveScoresHarvest < 90000) return; // cache for 90 seconds
+  if (now - lastLiveScoresHarvest < 90000) return;
   lastLiveScoresHarvest = now;
 
   try {
@@ -93,7 +91,6 @@ async function harvestLogosFromLiveScoresPage() {
 
     const harvested = await p.evaluate(() => {
       const map = {};
-      // 1. Inspect every div.live-c-w card (contains both team-score rows)
       const liveCards = document.querySelectorAll(".live-c-w, [class*='live-card']");
       liveCards.forEach((card) => {
         const teamRows = card.querySelectorAll(".team-score, [class*='team-score']");
@@ -109,7 +106,6 @@ async function harvestLogosFromLiveScoresPage() {
         });
       });
 
-      // 2. Scan all team images with alt tags
       document.querySelectorAll("img").forEach((img) => {
         const s = img.src || img.getAttribute("data-src") || "";
         const alt = (img.alt || img.getAttribute("title") || "").trim().toUpperCase();
@@ -125,9 +121,8 @@ async function harvestLogosFromLiveScoresPage() {
     await context.close().catch(() => {});
 
     Object.assign(_team_logos, harvested);
-    console.log("[Logos] Harvested logos for teams:", Object.keys(_team_logos));
   } catch (err) {
-    console.warn("[Logos] Live scores logo harvest warning:", err.message);
+    console.warn("[Logos] Harvest warning:", err.message);
   }
 }
 
@@ -176,7 +171,7 @@ async function scrape_crex_match(rawUrl) {
           return "";
         };
 
-        // 1. Team Logos from /Teams/ CDN on current page
+        // 1. Team Logos from /Teams/ CDN
         const teamImgs = Array.from(document.querySelectorAll("img")).filter((img) => {
           const s = img.src || img.getAttribute("data-src") || "";
           return s.includes("/Teams/") || (s.includes("Teams") && !s.includes("players") && !s.includes("svg"));
@@ -239,7 +234,7 @@ async function scrape_crex_match(rawUrl) {
           liveAction = matchStatus;
         }
 
-        // 4. Team Score (CRR Proximity)
+        // 4. Team Score (locked to CRR Proximity)
         let score = "-/-";
         let overs = "0.0";
         const scoreOverRegex = /(\b\d{1,3})[-\/](10|[0-9])\s*\(?([0-5]?\d\.[0-6])\)?/g;
@@ -312,13 +307,11 @@ async function scrape_crex_match(rawUrl) {
           }
         }
 
-        // 8. LAST WICKET WITH RUNS & BALLS (e.g. Ayaz Khan 45(63))
+        // 8. LAST WICKET WITH RUNS & BALLS
         let lastWicket = "-";
         const lastWktMatch = body.match(/Last\s*Wkt\s*[:\s]*([A-Za-z\s\.\-]+?)\s*(\d+\s*(?:\([0-9]+\))?)/i);
         if (lastWktMatch) {
-          const wName = lastWktMatch[1].trim();
-          const wScore = lastWktMatch[2].trim();
-          lastWicket = `${wName} ${wScore}`;
+          lastWicket = `${lastWktMatch[1].trim()} ${lastWktMatch[2].trim()}`;
         } else {
           const lwEl = document.querySelector(".last-wkt, .last-wicket, [class*='last-wkt']");
           if (lwEl && lwEl.innerText.trim()) {
@@ -343,36 +336,72 @@ async function scrape_crex_match(rawUrl) {
           }
         }
 
+        // Helper to extract 4s, 6s, and Strike Rate for Batters
+        const extractBatterExtras = (bName, rStr, bStr) => {
+          let fours = "0";
+          let sixes = "0";
+          let sr = "0.00";
+          const r = parseFloat(rStr);
+          const b = parseFloat(bStr);
+          if (!isNaN(r) && !isNaN(b) && b > 0) {
+            sr = ((r / b) * 100).toFixed(2);
+          }
+
+          if (bName) {
+            const esc = bName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            // Match pattern: Name ... Runs Balls 4s 6s SR
+            const m = body.match(new RegExp(esc + "[\\s\\S]*?(\\d+)\\s+(\\d+)\\s+(\\d+)\\s+(\\d+)\\s+([\\d\\.]+)", "i"));
+            if (m) {
+              fours = m[3];
+              sixes = m[4];
+              if (m[5]) sr = parseFloat(m[5]).toFixed(2);
+            }
+          }
+          return { fours, sixes, sr };
+        };
+
         // 10. Batters
         const batterMatches = [...body.matchAll(/([A-Z][a-zA-Z\s\.]+)\s*\*?\s+(\d+)\s*\(([0-9]+)\)/g)];
-        let batter1 = { name: "Batter 1", score: "-", image: "" };
-        let batter2 = { name: "Batter 2", score: "-", image: "" };
+        let batter1 = { name: "Batter 1", score: "-", fours: "0", sixes: "0", sr: "0.00", image: "" };
+        let batter2 = { name: "Batter 2", score: "-", fours: "0", sixes: "0", sr: "0.00", image: "" };
 
         if (batterMatches.length >= 1) {
           const b1Name = batterMatches[0][1].trim().split("\n").pop();
+          const b1Runs = batterMatches[0][2];
+          const b1Balls = batterMatches[0][3];
+          const b1Extra = extractBatterExtras(b1Name, b1Runs, b1Balls);
           batter1 = {
             name: b1Name,
-            score: `${batterMatches[0][2]} (${batterMatches[0][3]})`,
+            score: `${b1Runs} (${b1Balls})`,
+            fours: b1Extra.fours,
+            sixes: b1Extra.sixes,
+            sr: b1Extra.sr,
             image: findImageNearText(b1Name)
           };
         }
         if (batterMatches.length >= 2) {
           const b2Name = batterMatches[1][1].trim().split("\n").pop();
+          const b2Runs = batterMatches[1][2];
+          const b2Balls = batterMatches[1][3];
+          const b2Extra = extractBatterExtras(b2Name, b2Runs, b2Balls);
           batter2 = {
             name: b2Name,
-            score: `${batterMatches[1][2]} (${batterMatches[1][3]})`,
+            score: `${b2Runs} (${b2Balls})`,
+            fours: b2Extra.fours,
+            sixes: b2Extra.sixes,
+            sr: b2Extra.sr,
             image: findImageNearText(b2Name)
           };
         }
 
         // 11. Bowler
         const bowlerMatch = body.match(/([A-Z][a-zA-Z\s\.]+)\s+(\d+-\d+)\s*\((\d+\.?\d*)\)/);
-        let bowler = { name: "Bowler", figures: "-", econ: "-", image: "" };
+        let bowler = { name: "Bowler", figures: "-", econ: "0.00", image: "" };
 
         if (bowlerMatch) {
           const bName = bowlerMatch[1].trim().split("\n").pop();
           const bFigs = `${bowlerMatch[2]} (${bowlerMatch[3]})`;
-          let calcEcon = "-";
+          let calcEcon = "0.00";
           const runs = parseFloat(bowlerMatch[2].split("-")[1]);
           const ovs = parseFloat(bowlerMatch[3]);
           if (!isNaN(runs) && !isNaN(ovs) && ovs > 0) {
@@ -417,11 +446,9 @@ async function scrape_crex_match(rawUrl) {
       extracted.team1 = extracted.team1 || urlTeams?.team1 || "TEAM 1";
       extracted.team2 = extracted.team2 || urlTeams?.team2 || "TEAM 2";
 
-      // Cache any logos found on the match page
       if (extracted.team1Logo) _team_logos[extracted.team1.toUpperCase()] = extracted.team1Logo;
       if (extracted.team2Logo) _team_logos[extracted.team2.toUpperCase()] = extracted.team2Logo;
 
-      // Fallback: If second team logo is missing, retrieve from live scores overview cache
       if (!extracted.team2Logo && _team_logos[extracted.team2.toUpperCase()]) {
         extracted.team2Logo = _team_logos[extracted.team2.toUpperCase()];
       }
@@ -429,7 +456,6 @@ async function scrape_crex_match(rawUrl) {
         extracted.team1Logo = _team_logos[extracted.team1.toUpperCase()];
       }
 
-      // If still missing, trigger background harvest from crex.com/cricket-live-score
       if (!extracted.team2Logo) {
         harvestLogosFromLiveScoresPage().catch(() => {});
       }
@@ -448,7 +474,6 @@ async function scrape_crex_match(rawUrl) {
   return activeScrapePromise;
 }
 
-// Harvest live overview logos on initial startup
 setTimeout(harvestLogosFromLiveScoresPage, 4000);
 setInterval(harvestLogosFromLiveScoresPage, 180000);
 
