@@ -266,6 +266,13 @@ async function scrape_crex_match(rawUrl) {
           liveAction = resultBoxEl.innerText.trim();
         }
 
+        // 3. TARGET THE EXACT CHASE EQUATION (e.g., "OMA need 197 runs in 265 balls")
+        let chaseEquation = "";
+        const finalResultEl = document.querySelector(".final-result.comment, div.final-result, .final-result");
+        if (finalResultEl) {
+          chaseEquation = finalResultEl.innerText.trim().replace(/\s+/g, " ");
+        }
+
         const breakMatch = body.match(/\b(Lunch Break|Tea Break|Innings Break|Dinner Break|Drinks Break|Stumps(?: - Day \d+)?|Day \d+ - Stumps|Rain Delay|Rain stops play|Delayed by rain|Match delayed|Wet Outfield|Bad Light)\b/i);
         const wonMatch = body.match(/([A-Za-z0-9\-\s]+won\s+by\s+\d+\s+(?:runs|wickets)[^\n\.]*)/i);
         const tieMatch = body.match(/([A-Za-z0-9\-\s]+(?:Match tied|No result|Match abandoned)[^\n\.]*)/i);
@@ -280,6 +287,7 @@ async function scrape_crex_match(rawUrl) {
           matchStatus = tieMatch[1].trim();
         } else if (needMatch) {
           matchStatus = needMatch[1].trim();
+          if (!chaseEquation) chaseEquation = needMatch[1].trim();
         } else {
           const statusMatch = body.match(/([A-Za-z0-9\-\s]+(?:elected to|lead by|trail by|delayed|starts at|opt to)[^\n\.]+)/i);
           matchStatus = statusMatch ? statusMatch[1].trim() : "Match in Progress";
@@ -289,7 +297,7 @@ async function scrape_crex_match(rawUrl) {
           liveAction = matchStatus;
         }
 
-        // 3. Current Live Score
+        // 4. Current Live Score
         let score = "-";
         let overs = "0.0";
         const scoreOverRegex = /(\b\d{1,3})[-\/](10|[0-9])\s*\(?([0-5]?\d\.[0-6])\)?/g;
@@ -320,7 +328,7 @@ async function scrape_crex_match(rawUrl) {
           overs = best[3];
         }
 
-        // 4. Over Columns
+        // 5. Over Columns
         const recentOvers = [];
         const overBlocks = [...body.matchAll(/Over\s+(\d+)\s+([\s\S]*?)=\s*(\d+)/gi)];
         for (const ob of overBlocks) {
@@ -345,7 +353,7 @@ async function scrape_crex_match(rawUrl) {
           liveBall = centerBig ? centerBig[1] : "•";
         }
 
-        // 5. Stats Strip
+        // 6. Stats Strip
         const crrMatch = body.match(/CRR\s*[:\n]?\s*([\d\.]+)/i);
         const rrrMatch = body.match(/RRR\s*[:\n]?\s*([\d\.]+)/i);
         const partMatch = body.match(/(?:Partnership|P'ship)\s*[:\n]?\s*([0-9]+\s*\([0-9]+\))/i);
@@ -361,7 +369,7 @@ async function scrape_crex_match(rawUrl) {
           }
         }
 
-        // 6. Last Wicket & Next Batsman
+        // 7. Last Wicket & Next Batsman
         let lastWicket = "-";
         const lastWktMatch = body.match(/Last\s*Wkt\s*[:\s]*([A-Za-z\s\.\-]+?)\s*(\d+\s*(?:\([0-9]+\))?)/i);
         if (lastWktMatch) {
@@ -389,7 +397,7 @@ async function scrape_crex_match(rawUrl) {
           }
         }
 
-        // 7. Scorecard Batting Data
+        // 8. Scorecard Batting Data
         const scorecardBatters = {};
         try {
           const scRes = await fetch(scUrl);
@@ -427,7 +435,7 @@ async function scrape_crex_match(rawUrl) {
           return null;
         };
 
-        // 8. Striker Detection
+        // 9. Striker Detection
         const checkIsOnStrike = (shortName) => {
           if (!shortName) return false;
           const lower = shortName.toLowerCase().trim();
@@ -448,7 +456,7 @@ async function scrape_crex_match(rawUrl) {
           return false;
         };
 
-        // 9. Batters
+        // 10. Batters
         const batterMatches = [...body.matchAll(/([A-Z][a-zA-Z\s\.]+)\s*\*?\s+(\d+)\s*\(([0-9]+)\)/g)];
         let batter1 = { name: "Batter 1", score: "-", fours: "0", sixes: "0", sr: "0.00", onStrike: false, image: "" };
         let batter2 = { name: "Batter 2", score: "-", fours: "0", sixes: "0", sr: "0.00", onStrike: false, image: "" };
@@ -497,7 +505,7 @@ async function scrape_crex_match(rawUrl) {
           batter2.onStrike = false;
         }
 
-        // 10. Bowler
+        // 11. Bowler
         const bowlerMatch = body.match(/([A-Z][a-zA-Z\s\.]+)\s+(\d+-\d+)\s*\((\d+\.?\d*)\)/);
         let bowler = { name: "Bowler", figures: "-", econ: "0.00", image: "" };
 
@@ -528,6 +536,7 @@ async function scrape_crex_match(rawUrl) {
           overs,
           liveBall,
           liveAction,
+          chaseEquation,
           neededRuns: matchStatus,
           recentOvers: lastTwoOvers,
           crr: crrMatch ? crrMatch[1] : "--",
@@ -595,7 +604,7 @@ async function scrape_crex_match(rawUrl) {
       extracted.team1Logo = team1Logo;
       extracted.team2Logo = team2Logo;
 
-      // 11. ACCURATE TWO-TEAM INNINGS SCORE RESOLUTION
+      // 12. ACCURATE TWO-TEAM INNINGS SCORE RESOLUTION
       const isSecondInnings = extracted.target && extracted.target !== "--";
       const liveTeam = (extracted.liveTeamName || "").toUpperCase();
       const t1Name = extracted.team1.toUpperCase();
@@ -615,22 +624,18 @@ async function scrape_crex_match(rawUrl) {
         const isTeam2Batting = needText.includes(t2Name) || liveTeam === t2Name;
 
         if (isTeam2Batting) {
-          // Team 2 (e.g. OMA) is chasing/batting: their score is the live score
           team2Score = extracted.score ? extracted.score.replace("/", "-") : (t2CardScore || "0-0");
           team2Overs = extracted.overs || t2CardOvers || "0.0";
           team2Role = "BATTING";
 
-          // Team 1 (e.g. MUM) batted 1st and is now bowling
           team1Score = t1CardScore || (isNaN(firstInnRuns) ? "1st Inn" : `${firstInnRuns}-10`);
           team1Overs = t1CardOvers || "47.3";
           team1Role = "BOWLING";
         } else {
-          // Team 1 (e.g. MUM) is chasing/batting: their score is the live score
           team1Score = extracted.score ? extracted.score.replace("/", "-") : (t1CardScore || "0-0");
           team1Overs = extracted.overs || t1CardOvers || "0.0";
           team1Role = "BATTING";
 
-          // Team 2 (e.g. OMA) batted 1st
           team2Score = t2CardScore || (isNaN(firstInnRuns) ? "1st Inn" : `${firstInnRuns}-10`);
           team2Overs = t2CardOvers || "47.3";
           team2Role = "BOWLING";
@@ -687,7 +692,7 @@ async function scrape_crex_match(rawUrl) {
 setTimeout(harvestFromLiveScoresPage, 2500);
 setInterval(harvestFromLiveScoresPage, 60000);
 
-// ── API Routes (Preserved Exactly) ────────────────────────────────────────
+// ── API Routes ────────────────────────────────────────────────────────────
 
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok", service: "cricket-broadcast-scraper" });
