@@ -8,14 +8,12 @@ const PORT = process.env.PORT || 10000;
 app.use(cors({ origin: "*" }));
 app.use(express.json());
 
-// Set default URL directly to KM vs PT (13VD)
-let activeMatchUrl =
-  process.env.CREX_MATCH_URL ||
+// Default match set to KM vs PT
+let currentMatchUrl =
   "https://crex.com/cricket-live-score/km-vs-pt-12th-match-odisha-t20-league-2026-match-updates-13VD";
 
-// Pre-set with clean initial values for KM vs PT
-let cachedData = {
-  activeUrl: activeMatchUrl,
+let cachedScore = {
+  activeUrl: currentMatchUrl,
   team1: "KM",
   team1Logo: "",
   team2: "PT",
@@ -29,7 +27,7 @@ let cachedData = {
     { over: "20", balls: ["6", "0", "wd", "0", "2", "6"], total: "15" }
   ],
   crr: "7.00",
-  rrr: "-",
+  rrr: "--",
   partnership: "28(13)",
   target: "141",
   batter1: { name: "A Swain", score: "39 (25)", image: "" },
@@ -58,36 +56,59 @@ async function getBrowser() {
   return browser;
 }
 
-async function loadPage(targetUrl) {
-  try {
-    isSwitching = true;
-    const b = await getBrowser();
+// Navigates ONCE when URL changes
+async function switchMatch(targetUrl) {
+  if (isSwitching) return;
+  isSwitching = true;
 
-    if (page) {
-      await page.close().catch(() => {});
+  try {
+    const cleanUrl = targetUrl.trim().replace(/\.+$/, "");
+    console.log(">>> SWITCHING MATCH TO:", cleanUrl);
+    currentMatchUrl = cleanUrl;
+
+    // Flush old match data immediately
+    cachedScore = {
+      activeUrl: cleanUrl,
+      team1: "Loading...",
+      team1Logo: "",
+      team2: "Loading...",
+      team2Logo: "",
+      score: "-/-",
+      overs: "0.0",
+      liveBall: "...",
+      neededRuns: "Connecting to CREX...",
+      recentOvers: [],
+      crr: "--",
+      rrr: "--",
+      partnership: "--",
+      target: "--",
+      batter1: { name: "Batter 1", score: "-", image: "" },
+      batter2: { name: "Batter 2", score: "-", image: "" },
+      bowler: { name: "Bowler", figures: "-", econ: "-", image: "" }
+    };
+
+    const b = await getBrowser();
+    if (!page || page.isClosed()) {
+      const context = await b.newContext({
+        userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+        viewport: { width: 1280, height: 800 }
+      });
+      page = await context.newPage();
+      await page.route("**/*.{mp4,webm,woff,woff2,ttf,css}", (r) => r.abort());
     }
 
-    const context = await b.newContext({
-      userAgent:
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-      viewport: { width: 1280, height: 800 }
-    });
-
-    page = await context.newPage();
-    await page.route("**/*.{mp4,webm,woff,woff2,ttf,css}", (r) => r.abort());
-
-    console.log("Connecting to:", targetUrl);
-    await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 35000 });
+    await page.goto(cleanUrl, { waitUntil: "domcontentloaded", timeout: 35000 });
     await page.waitForTimeout(3000);
-    await extractData();
+    await scrapeData();
   } catch (err) {
-    console.error("Navigation warning:", err.message);
+    console.error("Switch match error:", err.message);
+    cachedScore.neededRuns = "Match URL error. Check link.";
   } finally {
     isSwitching = false;
   }
 }
 
-async function extractData() {
+async function scrapeData() {
   if (!page || isSwitching) return;
 
   try {
@@ -125,7 +146,7 @@ async function extractData() {
         }
       }
 
-      // 2. Winner / Match Equation
+      // 2. Winner / Equation
       let neededRuns = "";
       const wonMatch = body.match(/([A-Za-z0-9\-\s]+won\s+by\s+\d+\s+(?:runs|wickets)[^\n\.]*)/i);
       const tieMatch = body.match(/([A-Za-z0-9\-\s]+(?:Match tied|No result|Match abandoned)[^\n\.]*)/i);
@@ -142,7 +163,7 @@ async function extractData() {
         neededRuns = statusMatch ? statusMatch[1].trim() : "Match in Progress";
       }
 
-      // 3. Scores & Overs
+      // 3. Score & Overs
       let score = "";
       let overs = "";
       const scoreOverRegex = /(\b\d{1,3})[-\/](10|[0-9])\s*\(?([0-5]?\d\.[0-6])\)?/g;
@@ -154,7 +175,7 @@ async function extractData() {
         overs = last[3];
       }
 
-      // 4. Over Columns
+      // 4. Recent Overs
       const recentOvers = [];
       const overBlocks = [...body.matchAll(/Over\s+(\d+)\s+([\s\S]*?)=\s*(\d+)/gi)];
       for (const ob of overBlocks) {
@@ -243,9 +264,9 @@ async function extractData() {
       }
 
       return {
-        team1: team1 || "KM",
+        team1,
         team1Logo: findImageNearText(team1),
-        team2: team2 || "PT",
+        team2,
         team2Logo: findImageNearText(team2),
         score,
         overs,
@@ -262,49 +283,55 @@ async function extractData() {
       };
     });
 
-    cachedData.activeUrl = activeMatchUrl;
-    if (extracted.team1) cachedData.team1 = extracted.team1;
-    if (extracted.team2) cachedData.team2 = extracted.team2;
-    if (extracted.team1Logo) cachedData.team1Logo = extracted.team1Logo;
-    if (extracted.team2Logo) cachedData.team2Logo = extracted.team2Logo;
-    if (extracted.score) cachedData.score = extracted.score;
-    if (extracted.overs) cachedData.overs = extracted.overs;
-    if (extracted.liveBall) cachedData.liveBall = extracted.liveBall;
-    if (extracted.neededRuns) cachedData.neededRuns = extracted.neededRuns;
-    if (extracted.recentOvers && extracted.recentOvers.length > 0) cachedData.recentOvers = extracted.recentOvers;
+    cachedScore.activeUrl = currentMatchUrl;
+    if (extracted.team1) cachedScore.team1 = extracted.team1;
+    if (extracted.team2) cachedScore.team2 = extracted.team2;
+    if (extracted.team1Logo) cachedScore.team1Logo = extracted.team1Logo;
+    if (extracted.team2Logo) cachedScore.team2Logo = extracted.team2Logo;
+    if (extracted.score) cachedScore.score = extracted.score;
+    if (extracted.overs) cachedScore.overs = extracted.overs;
+    if (extracted.liveBall) cachedScore.liveBall = extracted.liveBall;
+    if (extracted.neededRuns) cachedScore.neededRuns = extracted.neededRuns;
+    if (extracted.recentOvers && extracted.recentOvers.length > 0) cachedScore.recentOvers = extracted.recentOvers;
 
-    cachedData.crr = extracted.crr;
-    cachedData.rrr = extracted.rrr;
-    cachedData.target = extracted.target;
-    cachedData.partnership = extracted.partnership;
+    cachedScore.crr = extracted.crr;
+    cachedScore.rrr = extracted.rrr;
+    cachedScore.target = extracted.target;
+    cachedScore.partnership = extracted.partnership;
 
-    if (extracted.batter1.name !== "Batter 1") cachedData.batter1 = extracted.batter1;
-    if (extracted.batter2.name !== "Batter 2") cachedData.batter2 = extracted.batter2;
-    if (extracted.bowler.name !== "Bowler") cachedData.bowler = extracted.bowler;
+    if (extracted.batter1.name !== "Batter 1") cachedScore.batter1 = extracted.batter1;
+    if (extracted.batter2.name !== "Batter 2") cachedScore.batter2 = extracted.batter2;
+    if (extracted.bowler.name !== "Bowler") cachedScore.bowler = extracted.bowler;
   } catch (err) {
-    console.warn("Extraction tick:", err.message);
+    console.warn("Scraping tick warning:", err.message);
   }
 }
 
-// Start browser process
-loadPage(activeMatchUrl);
-setInterval(extractData, 3500);
+// Start scraper on boot
+switchMatch(currentMatchUrl);
 
-app.get("/", (req, res) => {
-  res.json({ status: "online", activeMatchUrl });
+// Periodic background scrape every 3.5s
+setInterval(() => {
+  if (!isSwitching && page) {
+    scrapeData();
+  }
+}, 3500);
+
+// Endpoint 1: Called ONCE to change match URL
+app.all("/api/set-url", async (req, res) => {
+  const target = req.query.url || req.body?.url;
+  if (!target || !target.startsWith("http")) {
+    return res.status(400).json({ error: "Invalid URL. Must start with http" });
+  }
+
+  // Await page load so the client receives fresh data immediately
+  await switchMatch(target);
+  res.status(200).json({ status: "switched", activeUrl: currentMatchUrl, data: cachedScore });
 });
 
-// Primary Endpoint: accepts ?url=... and updates match
-app.get("/api/score", async (req, res) => {
-  let reqUrl = req.query.url;
-  if (reqUrl) {
-    reqUrl = reqUrl.trim().replace(/\.+$/, "");
-    if (reqUrl.startsWith("http") && reqUrl !== activeMatchUrl) {
-      activeMatchUrl = reqUrl;
-      await loadPage(activeMatchUrl);
-    }
-  }
-  res.status(200).json(cachedData);
+// Endpoint 2: Polled every 3 seconds to fetch current score without restarting browser
+app.get("/api/score", (req, res) => {
+  res.status(200).json(cachedScore);
 });
 
 process.on("SIGTERM", async () => {
