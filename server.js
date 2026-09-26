@@ -7,25 +7,27 @@ const PORT = process.env.PORT || 10000;
 
 app.use(cors({ origin: "*" }));
 
-// Known matches pre-mapped for instant switching
-const MATCH_URL_MAP = {
-  "122G": "https://crex.com/cricket-live-score/ausw-a-vs-indw-a-3rd-odi-australia-a-women-tour-of-india-2026-match-updates-122G",
+// Dynamic URL cache: maps IDs like "13VD" to their full CREX URL
+const urlCache = {
+  "13VD": "https://crex.com/cricket-live-score/km-vs-pt-12th-match-odisha-t20-league-2026-match-updates-13VD",
   "11AI": "https://crex.com/cricket-live-score/ind-vs-wi-1st-odi-west-indies-tour-of-india-2026-match-updates-11AI",
-  "VSV": "https://crex.com/cricket-live-score/eng-vs-sl-3rd-odi-sri-lanka-tour-of-england-2026-match-updates-VSV"
+  "VSV": "https://crex.com/cricket-live-score/eng-vs-sl-3rd-odi-sri-lanka-tour-of-england-2026-match-updates-VSV",
+  "122G": "https://crex.com/cricket-live-score/ausw-a-vs-indw-a-3rd-odi-australia-a-women-tour-of-india-2026-match-updates-122G"
 };
 
-let currentMatchId = "11AI";
-let currentMatchUrl = MATCH_URL_MAP["11AI"];
+let currentMatchId = "13VD";
+let currentMatchUrl = urlCache["13VD"];
 
 let cachedData = {
-  team1: "IND",
+  activeMatchId: "13VD",
+  team1: "KM",
   team1Logo: "",
-  team2: "WI",
+  team2: "PT",
   team2Logo: "",
   score: "0/0",
   overs: "0.0",
   liveBall: "-",
-  neededRuns: "Connecting...",
+  neededRuns: "Loading match data...",
   recentOvers: [],
   crr: "-",
   rrr: "-",
@@ -40,6 +42,27 @@ let browserInstance = null;
 let pageInstance = null;
 let isSwitching = false;
 
+// Crawls CREX fixtures to auto-discover match IDs
+async function harvestMatchUrls() {
+  if (!pageInstance) return;
+  try {
+    const foundLinks = await pageInstance.evaluate(() => {
+      const anchors = Array.from(document.querySelectorAll("a[href*='cricket-live-score']"));
+      return anchors.map(a => a.href).filter(Boolean);
+    });
+
+    foundLinks.forEach(link => {
+      const match = link.match(/-([a-zA-Z0-9]+)$/);
+      if (match) {
+        urlCache[match[1].toUpperCase()] = link;
+      }
+    });
+  } catch (e) {
+    // Non-fatal warning
+  }
+}
+
+// Launches browser and stays open
 async function initBrowser() {
   try {
     browserInstance = await chromium.launch({
@@ -63,68 +86,75 @@ async function initBrowser() {
     pageInstance = await context.newPage();
     await pageInstance.route("**/*.{mp4,webm,woff,woff2,ttf,css}", (route) => route.abort());
 
-    console.log(`Initial navigation to match: ${currentMatchId}`);
+    console.log(`Starting with match ID: ${currentMatchId}`);
     await pageInstance.goto(currentMatchUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
     await pageInstance.waitForTimeout(3000);
 
     scrapeData();
     setInterval(scrapeData, 3500);
+
+    // Harvest new match links every 60 seconds
+    setInterval(harvestMatchUrls, 60000);
   } catch (err) {
-    console.error("Browser launch error:", err.message);
+    console.error("Browser launch failed:", err.message);
     setTimeout(initBrowser, 10000);
   }
 }
 
-// Dynamically resolves an ID (e.g., 'VSV') to its full CREX URL
+// Automatically finds and switches to any Match ID
 async function switchMatch(targetId) {
-  if (!targetId || targetId === currentMatchId || isSwitching) return;
-  isSwitching = true;
+  if (!targetId) return;
   targetId = targetId.trim().toUpperCase();
 
-  console.log(`Switching match to ID: ${targetId}`);
+  if (targetId === currentMatchId && !isSwitching) return;
+  isSwitching = true;
+  console.log(`[SWITCH] Resolving URL for ID: ${targetId}`);
 
-  let targetUrl = MATCH_URL_MAP[targetId];
+  let resolvedUrl = urlCache[targetId];
 
-  // If not in known list, find it automatically on CREX
-  if (!targetUrl && pageInstance) {
+  // If ID is not in memory cache, search CREX fixtures list live
+  if (!resolvedUrl && pageInstance) {
     try {
-      await pageInstance.goto("https://crex.com/", { waitUntil: "domcontentloaded", timeout: 25000 });
+      console.log(`Searching CREX fixtures for ID: ${targetId}...`);
+      await pageInstance.goto("https://crex.com/fixtures", { waitUntil: "domcontentloaded", timeout: 25000 });
       await pageInstance.waitForTimeout(2000);
 
-      const foundUrl = await pageInstance.evaluate((id) => {
-        const links = Array.from(document.querySelectorAll("a[href*='cricket-live-score']"));
-        for (const a of links) {
-          if (a.href.toUpperCase().endsWith("-" + id) || a.href.toUpperCase().includes("-" + id + "-")) {
-            return a.href;
-          }
-        }
-        return null;
+      resolvedUrl = await pageInstance.evaluate((id) => {
+        const anchors = Array.from(document.querySelectorAll("a[href*='cricket-live-score']"));
+        const found = anchors.find(a => {
+          const upper = a.href.toUpperCase();
+          return upper.endsWith("-" + id) || upper.includes("-" + id + "?") || upper.includes("-" + id + "/");
+        });
+        return found ? found.href : null;
       }, targetId);
 
-      if (foundUrl) {
-        targetUrl = foundUrl;
-        MATCH_URL_MAP[targetId] = targetUrl;
+      if (resolvedUrl) {
+        urlCache[targetId] = resolvedUrl;
       }
     } catch (e) {
-      console.warn("Auto-discovery failed:", e.message);
+      console.warn("Fixture discovery error:", e.message);
     }
   }
 
-  // Fallback direct URL pattern if not found in list
-  if (!targetUrl) {
-    targetUrl = `https://crex.com/cricket-live-score/match-updates-${targetId}`;
-    MATCH_URL_MAP[targetId] = targetUrl;
+  // Fallback to direct match slug format if not found on fixtures list
+  if (!resolvedUrl) {
+    resolvedUrl = `https://crex.com/cricket-live-score/live-match-updates-${targetId}`;
+    urlCache[targetId] = resolvedUrl;
   }
 
   currentMatchId = targetId;
-  currentMatchUrl = targetUrl;
+  currentMatchUrl = resolvedUrl;
+  cachedData.activeMatchId = targetId;
+  cachedData.neededRuns = `Connecting to match ${targetId}...`;
 
   try {
+    console.log(`Navigating to: ${currentMatchUrl}`);
     await pageInstance.goto(currentMatchUrl, { waitUntil: "domcontentloaded", timeout: 35000 });
     await pageInstance.waitForTimeout(3000);
     await scrapeData();
   } catch (err) {
-    console.error(`Error opening match ${targetId}:`, err.message);
+    console.error(`Failed to load match ${targetId}:`, err.message);
+    cachedData.neededRuns = `Match ${targetId} not live or invalid ID`;
   } finally {
     isSwitching = false;
   }
@@ -163,7 +193,7 @@ async function scrapeData() {
       const team1Logo = findImageNearText(team1);
       const team2Logo = findImageNearText(team2);
 
-      // 2. Score & Overs
+      // 2. Score & Overs Clean Extraction
       let score = "";
       let overs = "";
       const scoreOverRegex = /(\b\d{1,3})[-\/](10|[0-9])\s*\(?([0-5]?\d\.[0-6])\)?/g;
@@ -188,7 +218,7 @@ async function scrapeData() {
         overs = best[3];
       }
 
-      // 3. Match Situation
+      // 3. Match Situation / Target Equation
       let neededRuns = "";
       const needMatch = body.match(/([A-Za-z0-9\-]+\s+need\s+\d+\s+runs\s+in\s+\d+\s+balls)/i);
       if (needMatch) {
@@ -198,7 +228,7 @@ async function scrapeData() {
         neededRuns = statusMatch ? statusMatch[1].trim() : "Match in Progress";
       }
 
-      // 4. Recent Overs
+      // 4. Over-by-Over Columns
       const recentOvers = [];
       const overBlocks = [...body.matchAll(/Over\s+(\d+)\s+([\s\S]*?)=\s*(\d+)/gi)];
       for (const ob of overBlocks) {
@@ -307,8 +337,8 @@ async function scrapeData() {
 
     if (extracted.score && extracted.score !== "0/0") cachedData.score = extracted.score;
     if (extracted.overs && extracted.overs !== "0.0") cachedData.overs = extracted.overs;
-    if (extracted.team1) cachedData.team1 = extracted.team1;
-    if (extracted.team2) cachedData.team2 = extracted.team2;
+    if (extracted.team1 && extracted.team1 !== "TEAM 1") cachedData.team1 = extracted.team1;
+    if (extracted.team2 && extracted.team2 !== "TEAM 2") cachedData.team2 = extracted.team2;
     if (extracted.team1Logo) cachedData.team1Logo = extracted.team1Logo;
     if (extracted.team2Logo) cachedData.team2Logo = extracted.team2Logo;
     if (extracted.liveBall) cachedData.liveBall = extracted.liveBall;
@@ -324,23 +354,23 @@ async function scrapeData() {
     if (extracted.batter2.name !== "Batter 2") cachedData.batter2 = extracted.batter2;
     if (extracted.bowler.name !== "Bowler") cachedData.bowler = extracted.bowler;
   } catch (err) {
-    console.warn("Scraping warning:", err.message);
+    console.warn("Scraping tick warning:", err.message);
   }
 }
 
 initBrowser();
 
 app.get("/", (req, res) => {
-  res.json({ status: "online", activeMatch: currentMatchId, url: currentMatchUrl });
+  res.json({ status: "online", activeMatch: currentMatchId, url: currentMatchUrl, cachedIds: Object.keys(urlCache) });
 });
 
-// Dynamic endpoint accepting ?id=11AI or ?id=VSV
+// Dynamic endpoint: /api/score?id=13VD
 app.get("/api/score", async (req, res) => {
   const reqId = req.query.id;
   if (reqId && reqId.toUpperCase() !== currentMatchId) {
     switchMatch(reqId);
   }
-  res.status(200).json({ activeMatch: currentMatchId, ...cachedData });
+  res.status(200).json(cachedData);
 });
 
 process.on("SIGTERM", async () => {
@@ -349,5 +379,5 @@ process.on("SIGTERM", async () => {
 });
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Preet Sports Relay running on port ${PORT}`);
+  console.log(`Preet Sports Relay active on port ${PORT}`);
 });
