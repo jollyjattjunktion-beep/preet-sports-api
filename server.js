@@ -14,6 +14,9 @@ const _match_registry = {};
 let _last_used_url =
   "https://crex.com/cricket-live-score/km-vs-pt-12th-match-odisha-t20-league-2026-match-updates-13VD";
 
+// Global team logo cache mapping team names/abbreviations to their /Teams/ vector URLs
+const _team_logos = {};
+
 function _url_to_id(url) {
   return crypto.createHash("sha256").update(url.trim()).digest("hex").slice(0, 8);
 }
@@ -37,6 +40,7 @@ const _scrape_cache = {};
 let activeScrapePromise = null;
 let browserInstance = null;
 let pageInstance = null;
+let lastLiveScoresHarvest = 0;
 
 async function getBrowser() {
   if (!browserInstance || !browserInstance.isConnected()) {
@@ -67,6 +71,64 @@ async function getPage() {
     await pageInstance.route("**/*.{mp4,webm,woff,woff2,ttf,css}", (r) => r.abort());
   }
   return pageInstance;
+}
+
+// Harvests both team logos from div.live-c-w on crex.com/cricket-live-score
+async function harvestLogosFromLiveScoresPage() {
+  const now = Date.now();
+  if (now - lastLiveScoresHarvest < 90000) return; // cache for 90 seconds
+  lastLiveScoresHarvest = now;
+
+  try {
+    const browser = await getBrowser();
+    const context = await browser.newContext({
+      userAgent:
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    });
+    const p = await context.newPage();
+    await p.route("**/*.{mp4,webm,woff,woff2,ttf,css}", (r) => r.abort());
+
+    await p.goto("https://crex.com/cricket-live-score", { waitUntil: "domcontentloaded", timeout: 25000 });
+    await p.waitForTimeout(2000);
+
+    const harvested = await p.evaluate(() => {
+      const map = {};
+      // 1. Inspect every div.live-c-w card (contains both team-score rows)
+      const liveCards = document.querySelectorAll(".live-c-w, [class*='live-card']");
+      liveCards.forEach((card) => {
+        const teamRows = card.querySelectorAll(".team-score, [class*='team-score']");
+        teamRows.forEach((row) => {
+          const img = row.querySelector("img");
+          const textMatch = row.innerText.trim().match(/^([A-Za-z0-9\-]+)/);
+          if (img && textMatch) {
+            const src = img.src || img.getAttribute("data-src") || "";
+            if (src && src.includes("/Teams/")) {
+              map[textMatch[1].toUpperCase()] = src;
+            }
+          }
+        });
+      });
+
+      // 2. Scan all team images with alt tags
+      document.querySelectorAll("img").forEach((img) => {
+        const s = img.src || img.getAttribute("data-src") || "";
+        const alt = (img.alt || img.getAttribute("title") || "").trim().toUpperCase();
+        if (s && s.includes("/Teams/") && alt && alt.length <= 15) {
+          map[alt] = s;
+        }
+      });
+
+      return map;
+    });
+
+    await p.close().catch(() => {});
+    await context.close().catch(() => {});
+
+    Object.assign(_team_logos, harvested);
+    console.log("[Logos] Harvested logos for teams:", Object.keys(_team_logos));
+  } catch (err) {
+    console.warn("[Logos] Live scores logo harvest warning:", err.message);
+  }
 }
 
 async function scrape_crex_match(rawUrl) {
@@ -114,7 +176,7 @@ async function scrape_crex_match(rawUrl) {
           return "";
         };
 
-        // 1. Team Logos from /Teams/ CDN
+        // 1. Team Logos from /Teams/ CDN on current page
         const teamImgs = Array.from(document.querySelectorAll("img")).filter((img) => {
           const s = img.src || img.getAttribute("data-src") || "";
           return s.includes("/Teams/") || (s.includes("Teams") && !s.includes("players") && !s.includes("svg"));
@@ -177,7 +239,7 @@ async function scrape_crex_match(rawUrl) {
           liveAction = matchStatus;
         }
 
-        // 4. Team Score (locked to CRR Proximity)
+        // 4. Team Score (CRR Proximity)
         let score = "-/-";
         let overs = "0.0";
         const scoreOverRegex = /(\b\d{1,3})[-\/](10|[0-9])\s*\(?([0-5]?\d\.[0-6])\)?/g;
@@ -250,7 +312,7 @@ async function scrape_crex_match(rawUrl) {
           }
         }
 
-        // 8. LAST WICKET WITH RUNS & BALLS (e.g., Anushka Sharma 58(42))
+        // 8. LAST WICKET WITH RUNS & BALLS (e.g. Ayaz Khan 45(63))
         let lastWicket = "-";
         const lastWktMatch = body.match(/Last\s*Wkt\s*[:\s]*([A-Za-z\s\.\-]+?)\s*(\d+\s*(?:\([0-9]+\))?)/i);
         if (lastWktMatch) {
@@ -269,7 +331,7 @@ async function scrape_crex_match(rawUrl) {
           }
         }
 
-        // 9. NEXT BATSMAN EXTRACTION
+        // 9. NEXT BATSMAN
         let nextBatsman = "-";
         const nextBatMatch = body.match(/(?:Next\s*(?:Batter|Batsman|Bat)|Yet\s*to\s*bat)\s*[:\s]*([A-Za-z\s\.\-]+)/i);
         if (nextBatMatch) {
@@ -354,8 +416,25 @@ async function scrape_crex_match(rawUrl) {
 
       extracted.team1 = extracted.team1 || urlTeams?.team1 || "TEAM 1";
       extracted.team2 = extracted.team2 || urlTeams?.team2 || "TEAM 2";
-      extracted.success = true;
 
+      // Cache any logos found on the match page
+      if (extracted.team1Logo) _team_logos[extracted.team1.toUpperCase()] = extracted.team1Logo;
+      if (extracted.team2Logo) _team_logos[extracted.team2.toUpperCase()] = extracted.team2Logo;
+
+      // Fallback: If second team logo is missing, retrieve from live scores overview cache
+      if (!extracted.team2Logo && _team_logos[extracted.team2.toUpperCase()]) {
+        extracted.team2Logo = _team_logos[extracted.team2.toUpperCase()];
+      }
+      if (!extracted.team1Logo && _team_logos[extracted.team1.toUpperCase()]) {
+        extracted.team1Logo = _team_logos[extracted.team1.toUpperCase()];
+      }
+
+      // If still missing, trigger background harvest from crex.com/cricket-live-score
+      if (!extracted.team2Logo) {
+        harvestLogosFromLiveScoresPage().catch(() => {});
+      }
+
+      extracted.success = true;
       _scrape_cache[url] = { timestamp: Date.now(), data: extracted };
       return extracted;
     } catch (err) {
@@ -369,7 +448,11 @@ async function scrape_crex_match(rawUrl) {
   return activeScrapePromise;
 }
 
-// ── API Routes ────────────────────────────────────────────────────────────
+// Harvest live overview logos on initial startup
+setTimeout(harvestLogosFromLiveScoresPage, 4000);
+setInterval(harvestLogosFromLiveScoresPage, 180000);
+
+// ── API Routes (Preserved Exactly) ────────────────────────────────────────
 
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok", service: "cricket-broadcast-scraper" });
