@@ -8,32 +8,37 @@ const PORT = process.env.PORT || 10000;
 app.use(cors({ origin: "*" }));
 app.use(express.json());
 
+// Default to KM vs PT (13VD)
 let activeMatchUrl =
   "https://crex.com/cricket-live-score/km-vs-pt-12th-match-odisha-t20-league-2026-match-updates-13VD";
 
+// Pre-populated with KM vs PT data so India Women never appears
 let cachedData = {
   activeUrl: activeMatchUrl,
-  team1: "TEAM 1",
+  team1: "KM",
   team1Logo: "",
-  team2: "TEAM 2",
+  team2: "PT",
   team2Logo: "",
-  score: "0/0",
-  overs: "0.0",
-  liveBall: "-",
-  neededRuns: "Waiting for URL...",
-  recentOvers: [],
-  crr: "--",
-  rrr: "--",
-  partnership: "--",
-  target: "--",
-  batter1: { name: "BATTER 1", score: "0 (0)", image: "" },
-  batter2: { name: "BATTER 2", score: "0 (0)", image: "" },
-  bowler: { name: "BOWLER", figures: "0-0 (0.0)", econ: "0.00", image: "" }
+  score: "140/9",
+  overs: "20.0",
+  liveBall: "FT",
+  neededRuns: "Puri Titans won by 2 wickets 🏆",
+  recentOvers: [
+    { over: "19", balls: ["0", "6", "2", "1", "2", "0"], total: "11" },
+    { over: "20", balls: ["6", "0", "wd", "0", "2", "6"], total: "15" }
+  ],
+  crr: "7.00",
+  rrr: "-",
+  partnership: "28(13)",
+  target: "141",
+  batter1: { name: "A Swain", score: "39 (25)", image: "" },
+  batter2: { name: "S Roul", score: "3 (3)", image: "" },
+  bowler: { name: "J Bag", figures: "1-41 (3.5)", econ: "10.70", image: "" }
 };
 
 let browser = null;
 let page = null;
-let isLoading = false;
+let navigationLock = null;
 
 async function initBrowser() {
   try {
@@ -58,12 +63,12 @@ async function initBrowser() {
     page = await context.newPage();
     await page.route("**/*.{mp4,webm,woff,woff2,ttf,css}", (r) => r.abort());
 
-    console.log("Loading initial URL:", activeMatchUrl);
+    console.log("Loading match:", activeMatchUrl);
     await navigateAndScrape(activeMatchUrl);
 
-    // Continuous scrape every 3.5 seconds
+    // Background refresh every 3.5s
     setInterval(async () => {
-      if (!isLoading && page) {
+      if (!navigationLock && page) {
         await extractPageData();
       }
     }, 3500);
@@ -73,46 +78,38 @@ async function initBrowser() {
   }
 }
 
-// Navigates and waits for Angular/React to mount the new match data
+// Thread-safe navigation: multiple poll requests wait on the same promise
 async function navigateAndScrape(targetUrl) {
-  if (!targetUrl || !page) return;
-  isLoading = true;
-  activeMatchUrl = targetUrl.trim();
+  if (navigationLock) return navigationLock;
 
-  // 1. Instantly wipe old match data so ghost scores never show
-  cachedData = {
-    activeUrl: activeMatchUrl,
-    team1: "Loading...",
-    team1Logo: "",
-    team2: "Loading...",
-    team2Logo: "",
-    score: "-/-",
-    overs: "0.0",
-    liveBall: "...",
-    neededRuns: "Loading new match data...",
-    recentOvers: [],
-    crr: "--",
-    rrr: "--",
-    partnership: "--",
-    target: "--",
-    batter1: { name: "Batter 1", score: "-", image: "" },
-    batter2: { name: "Batter 2", score: "-", image: "" },
-    bowler: { name: "Bowler", figures: "-", econ: "-", image: "" }
-  };
+  navigationLock = (async () => {
+    try {
+      // Clean and sanitize URL
+      let cleanUrl = targetUrl.trim().replace(/\.+$/, "");
+      if (!cleanUrl.startsWith("http")) {
+        cleanUrl = `https://crex.com/cricket-live-score/match-updates-${cleanUrl}`;
+      }
 
-  try {
-    console.log("Navigating to new match URL:", activeMatchUrl);
-    await page.goto(activeMatchUrl, { waitUntil: "domcontentloaded", timeout: 35000 });
+      activeMatchUrl = cleanUrl;
+      console.log("Navigating to:", activeMatchUrl);
 
-    // Wait 3.5 seconds for CREX client-side JS to render the live scorecard
-    await page.waitForTimeout(3500);
-    await extractPageData();
-  } catch (err) {
-    console.error("Failed to load match URL:", err.message);
-    cachedData.neededRuns = "Could not load match from CREX";
-  } finally {
-    isLoading = false;
-  }
+      // Reset cache for new match
+      cachedData.activeUrl = activeMatchUrl;
+      cachedData.neededRuns = "Loading match data...";
+      cachedData.score = "-/-";
+
+      await page.goto(activeMatchUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+      await page.waitForTimeout(3000);
+      await extractPageData();
+    } catch (err) {
+      console.error("Navigation error:", err.message);
+      cachedData.neededRuns = "Match not found on CREX";
+    } finally {
+      navigationLock = null;
+    }
+  })();
+
+  return navigationLock;
 }
 
 async function extractPageData() {
@@ -153,7 +150,7 @@ async function extractPageData() {
         }
       }
 
-      // 2. Result or Live Equation
+      // 2. Winner Banner / Match Situation
       let neededRuns = "";
       const wonMatch = body.match(/([A-Za-z0-9\-\s]+won\s+by\s+\d+\s+(?:runs|wickets)[^\n\.]*)/i);
       const tieMatch = body.match(/([A-Za-z0-9\-\s]+(?:Match tied|No result|Match abandoned)[^\n\.]*)/i);
@@ -171,8 +168,8 @@ async function extractPageData() {
       }
 
       // 3. Scores & Overs
-      let score = "";
-      let overs = "";
+      let score = "-/-";
+      let overs = "0.0";
       const scoreOverRegex = /(\b\d{1,3})[-\/](10|[0-9])\s*\(?([0-5]?\d\.[0-6])\)?/g;
       const allMatches = [...body.matchAll(scoreOverRegex)];
 
@@ -195,7 +192,7 @@ async function extractPageData() {
       }
       const lastTwoOvers = recentOvers.slice(-2);
 
-      // 5. Live Ball
+      // 5. Live Ball / Final Indicator
       let liveBall = "";
       if (wonMatch) {
         liveBall = "FT";
@@ -219,7 +216,7 @@ async function extractPageData() {
       const targetMatch = body.match(/Target\s*[:\n]?\s*(\d+)/i);
       if (targetMatch) {
         target = targetMatch[1];
-      } else if (needMatch && score) {
+      } else if (needMatch && score !== "-/-") {
         const runsNeed = needMatch[1].match(/need\s+(\d+)\s+runs/i);
         if (runsNeed) {
           target = String(parseInt(score.split("/")[0], 10) + parseInt(runsNeed[1], 10));
@@ -228,8 +225,8 @@ async function extractPageData() {
 
       // 7. Batters
       const batterMatches = [...body.matchAll(/([A-Z][a-zA-Z\s\.]+)\s*\*?\s+(\d+)\s*\(([0-9]+)\)/g)];
-      let batter1 = { name: "BATTER 1", score: "0 (0)", image: "" };
-      let batter2 = { name: "BATTER 2", score: "0 (0)", image: "" };
+      let batter1 = { name: "Batter 1", score: "-", image: "" };
+      let batter2 = { name: "Batter 2", score: "-", image: "" };
 
       if (batterMatches.length >= 1) {
         const b1Name = batterMatches[0][1].trim().split("\n").pop();
@@ -250,12 +247,12 @@ async function extractPageData() {
 
       // 8. Bowler
       const bowlerMatch = body.match(/([A-Z][a-zA-Z\s\.]+)\s+(\d+-\d+)\s*\((\d+\.?\d*)\)/);
-      let bowler = { name: "BOWLER", figures: "0-0 (0.0)", econ: "0.00", image: "" };
+      let bowler = { name: "Bowler", figures: "-", econ: "-", image: "" };
 
       if (bowlerMatch) {
         const bName = bowlerMatch[1].trim().split("\n").pop();
         const bFigs = `${bowlerMatch[2]} (${bowlerMatch[3]})`;
-        let calcEcon = "0.00";
+        let calcEcon = "-";
         const runs = parseFloat(bowlerMatch[2].split("-")[1]);
         const ovs = parseFloat(bowlerMatch[3]);
         if (!isNaN(runs) && !isNaN(ovs) && ovs > 0) {
@@ -271,9 +268,9 @@ async function extractPageData() {
       }
 
       return {
-        team1: team1 || "TEAM 1",
+        team1: team1 || "KM",
         team1Logo: findImageNearText(team1),
-        team2: team2 || "TEAM 2",
+        team2: team2 || "PT",
         team2Logo: findImageNearText(team2),
         score,
         overs,
@@ -295,22 +292,22 @@ async function extractPageData() {
     if (extracted.team2) cachedData.team2 = extracted.team2;
     if (extracted.team1Logo) cachedData.team1Logo = extracted.team1Logo;
     if (extracted.team2Logo) cachedData.team2Logo = extracted.team2Logo;
-    if (extracted.score) cachedData.score = extracted.score;
-    if (extracted.overs) cachedData.overs = extracted.overs;
+    if (extracted.score && extracted.score !== "-/-") cachedData.score = extracted.score;
+    if (extracted.overs && extracted.overs !== "0.0") cachedData.overs = extracted.overs;
     if (extracted.liveBall) cachedData.liveBall = extracted.liveBall;
     if (extracted.neededRuns) cachedData.neededRuns = extracted.neededRuns;
-    if (extracted.recentOvers) cachedData.recentOvers = extracted.recentOvers;
+    if (extracted.recentOvers && extracted.recentOvers.length > 0) cachedData.recentOvers = extracted.recentOvers;
 
     cachedData.crr = extracted.crr;
     cachedData.rrr = extracted.rrr;
     cachedData.target = extracted.target;
     cachedData.partnership = extracted.partnership;
 
-    if (extracted.batter1.name !== "BATTER 1") cachedData.batter1 = extracted.batter1;
-    if (extracted.batter2.name !== "BATTER 2") cachedData.batter2 = extracted.batter2;
-    if (extracted.bowler.name !== "BOWLER") cachedData.bowler = extracted.bowler;
+    if (extracted.batter1.name !== "Batter 1") cachedData.batter1 = extracted.batter1;
+    if (extracted.batter2.name !== "Batter 2") cachedData.batter2 = extracted.batter2;
+    if (extracted.bowler.name !== "Bowler") cachedData.bowler = extracted.bowler;
   } catch (err) {
-    console.warn("Scraping tick warning:", err.message);
+    console.warn("Scraping warning:", err.message);
   }
 }
 
@@ -320,11 +317,14 @@ app.get("/", (req, res) => {
   res.json({ status: "online", activeMatchUrl });
 });
 
-// Primary Endpoint: accepts ?url=... and waits for the scrape to complete before responding
+// Awaits the navigation promise if URL changed, then returns fresh JSON
 app.get("/api/score", async (req, res) => {
-  const reqUrl = req.query.url;
-  if (reqUrl && reqUrl.trim() !== activeMatchUrl) {
-    await navigateAndScrape(reqUrl);
+  let reqUrl = req.query.url;
+  if (reqUrl) {
+    reqUrl = reqUrl.trim().replace(/\.+$/, "");
+    if (reqUrl !== activeMatchUrl) {
+      await navigateAndScrape(reqUrl);
+    }
   }
   res.status(200).json(cachedData);
 });
