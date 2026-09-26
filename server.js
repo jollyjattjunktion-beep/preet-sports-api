@@ -147,14 +147,13 @@ async function scrape_crex_match(rawUrl) {
           }
         }
 
-        // 3. TARGET THE CREX RESULT BOX (4, 6, Leg Bye, Run Out, Wicket, Over, Lunch Break)
+        // 3. TARGET CREX RESULT BOX (4, 6, Leg Bye, Run Out, Wicket, Over, Lunch Break)
         let liveAction = "";
         const resultBoxEl = document.querySelector(".result-box, .team-result .result-box, div.result-box, .result-box span.font2");
         if (resultBoxEl) {
           liveAction = resultBoxEl.innerText.trim();
         }
 
-        // Status & Session breaks fallback
         const breakMatch = body.match(/\b(Lunch Break|Tea Break|Innings Break|Dinner Break|Drinks Break|Stumps(?: - Day \d+)?|Day \d+ - Stumps|Rain Delay|Rain stops play|Delayed by rain|Match delayed|Wet Outfield|Bad Light)\b/i);
         const wonMatch = body.match(/([A-Za-z0-9\-\s]+won\s+by\s+\d+\s+(?:runs|wickets)[^\n\.]*)/i);
         const tieMatch = body.match(/([A-Za-z0-9\-\s]+(?:Match tied|No result|Match abandoned)[^\n\.]*)/i);
@@ -178,7 +177,7 @@ async function scrape_crex_match(rawUrl) {
           liveAction = matchStatus;
         }
 
-        // 4. Team Score (CRR Proximity)
+        // 4. Team Score
         let score = "-/-";
         let overs = "0.0";
         const scoreOverRegex = /(\b\d{1,3})[-\/](10|[0-9])\s*\(?([0-5]?\d\.[0-6])\)?/g;
@@ -251,7 +250,25 @@ async function scrape_crex_match(rawUrl) {
           }
         }
 
-        // 8. Batters
+        // 8. LAST WICKET & NEXT BATSMAN EXTRACTION
+        let lastWicket = "-";
+        const lastWktMatch = body.match(/Last\s*Wkt\s*[:\s]+([A-Za-z\s\.\-]+(?:\s+\d+\s*\(\d+\))?)/i);
+        if (lastWktMatch) {
+          lastWicket = lastWktMatch[1].trim().replace(/\s+/g, " ");
+        }
+
+        let nextBatsman = "-";
+        const nextBatMatch = body.match(/(?:Next\s*(?:Batter|Batsman|Bat)|Yet\s*to\s*bat)\s*[:\s]+([A-Za-z\s\.\-]+)/i);
+        if (nextBatMatch) {
+          nextBatsman = nextBatMatch[1].trim().split(/[,;\n]/)[0].trim();
+        } else {
+          const nextEl = document.querySelector(".yet-to-bat, .next-batsman, .upcoming-batsman");
+          if (nextEl) {
+            nextBatsman = nextEl.innerText.trim().split(/[,;\n]/)[0].trim();
+          }
+        }
+
+        // 9. Batters
         const batterMatches = [...body.matchAll(/([A-Z][a-zA-Z\s\.]+)\s*\*?\s+(\d+)\s*\(([0-9]+)\)/g)];
         let batter1 = { name: "Batter 1", score: "-", image: "" };
         let batter2 = { name: "Batter 2", score: "-", image: "" };
@@ -273,7 +290,7 @@ async function scrape_crex_match(rawUrl) {
           };
         }
 
-        // 9. Bowler
+        // 10. Bowler
         const bowlerMatch = body.match(/([A-Z][a-zA-Z\s\.]+)\s+(\d+-\d+)\s*\((\d+\.?\d*)\)/);
         let bowler = { name: "Bowler", figures: "-", econ: "-", image: "" };
 
@@ -303,13 +320,15 @@ async function scrape_crex_match(rawUrl) {
           score,
           overs,
           liveBall,
-          liveAction, // Contains .result-box (4, 6, Leg Bye, Run Out, Wicket, Over, etc.)
+          liveAction,
           neededRuns: matchStatus,
           recentOvers: lastTwoOvers,
           crr: crrMatch ? crrMatch[1] : "--",
           rrr: rrrMatch ? rrrMatch[1] : "--",
           target,
           partnership: partMatch ? partMatch[1] : "--",
+          lastWicket,
+          nextBatsman,
           batter1,
           batter2,
           bowler
