@@ -12,27 +12,28 @@ let activeMatchUrl =
   "https://crex.com/cricket-live-score/km-vs-pt-12th-match-odisha-t20-league-2026-match-updates-13VD";
 
 let cachedData = {
+  activeUrl: activeMatchUrl,
   team1: "TEAM 1",
   team1Logo: "",
   team2: "TEAM 2",
   team2Logo: "",
-  score: "-/-",
+  score: "0/0",
   overs: "0.0",
-  liveBall: "🏆",
-  neededRuns: "Loading match data...",
+  liveBall: "-",
+  neededRuns: "Waiting for URL...",
   recentOvers: [],
-  crr: "-",
-  rrr: "-",
-  partnership: "-",
-  target: "-",
-  batter1: { name: "Batter 1", score: "0 (0)", image: "" },
-  batter2: { name: "Batter 2", score: "0 (0)", image: "" },
-  bowler: { name: "Bowler", figures: "0-0 (0.0)", econ: "0.00", image: "" }
+  crr: "--",
+  rrr: "--",
+  partnership: "--",
+  target: "--",
+  batter1: { name: "BATTER 1", score: "0 (0)", image: "" },
+  batter2: { name: "BATTER 2", score: "0 (0)", image: "" },
+  bowler: { name: "BOWLER", figures: "0-0 (0.0)", econ: "0.00", image: "" }
 };
 
 let browser = null;
 let page = null;
-let isSwitching = false;
+let isLoading = false;
 
 async function initBrowser() {
   try {
@@ -57,52 +58,71 @@ async function initBrowser() {
     page = await context.newPage();
     await page.route("**/*.{mp4,webm,woff,woff2,ttf,css}", (r) => r.abort());
 
-    console.log("Navigating to:", activeMatchUrl);
-    await page.goto(activeMatchUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
-    await page.waitForTimeout(3000);
+    console.log("Loading initial URL:", activeMatchUrl);
+    await navigateAndScrape(activeMatchUrl);
 
-    scrapeLiveData();
-    setInterval(scrapeLiveData, 3500);
+    // Continuous scrape every 3.5 seconds
+    setInterval(async () => {
+      if (!isLoading && page) {
+        await extractPageData();
+      }
+    }, 3500);
   } catch (err) {
     console.error("Browser launch error:", err.message);
     setTimeout(initBrowser, 10000);
   }
 }
 
-async function loadTargetUrl(newUrl) {
-  if (!newUrl || !page || isSwitching) return;
-  if (!newUrl.startsWith("http")) return;
+// Navigates and waits for Angular/React to mount the new match data
+async function navigateAndScrape(targetUrl) {
+  if (!targetUrl || !page) return;
+  isLoading = true;
+  activeMatchUrl = targetUrl.trim();
 
-  isSwitching = true;
-  activeMatchUrl = newUrl.trim();
-  console.log("Switching to match URL:", activeMatchUrl);
-
-  // Clear previous score so old match numbers vanish immediately
-  cachedData.score = "-/-";
-  cachedData.overs = "0.0";
-  cachedData.neededRuns = "Loading new match...";
+  // 1. Instantly wipe old match data so ghost scores never show
+  cachedData = {
+    activeUrl: activeMatchUrl,
+    team1: "Loading...",
+    team1Logo: "",
+    team2: "Loading...",
+    team2Logo: "",
+    score: "-/-",
+    overs: "0.0",
+    liveBall: "...",
+    neededRuns: "Loading new match data...",
+    recentOvers: [],
+    crr: "--",
+    rrr: "--",
+    partnership: "--",
+    target: "--",
+    batter1: { name: "Batter 1", score: "-", image: "" },
+    batter2: { name: "Batter 2", score: "-", image: "" },
+    bowler: { name: "Bowler", figures: "-", econ: "-", image: "" }
+  };
 
   try {
+    console.log("Navigating to new match URL:", activeMatchUrl);
     await page.goto(activeMatchUrl, { waitUntil: "domcontentloaded", timeout: 35000 });
-    await page.waitForTimeout(3000);
-    await scrapeLiveData();
+
+    // Wait 3.5 seconds for CREX client-side JS to render the live scorecard
+    await page.waitForTimeout(3500);
+    await extractPageData();
   } catch (err) {
-    console.error("Navigation error:", err.message);
-    cachedData.neededRuns = "Could not load match URL";
+    console.error("Failed to load match URL:", err.message);
+    cachedData.neededRuns = "Could not load match from CREX";
   } finally {
-    isSwitching = false;
+    isLoading = false;
   }
 }
 
-async function scrapeLiveData() {
-  if (!page || isSwitching) return;
+async function extractPageData() {
+  if (!page) return;
 
   try {
     const extracted = await page.evaluate(() => {
       const getTxt = (sel) => document.querySelector(sel)?.innerText?.trim() || "";
       const body = document.body.innerText;
 
-      // Image Finder Helper
       const findImageNearText = (name) => {
         if (!name || name.includes("Batter") || name.includes("Bowler")) return "";
         const all = Array.from(document.querySelectorAll("*")).filter(
@@ -133,46 +153,33 @@ async function scrapeLiveData() {
         }
       }
 
-      // 2. Completed Match Status / Winner Detection
-      let resultText = "";
+      // 2. Result or Live Equation
+      let neededRuns = "";
       const wonMatch = body.match(/([A-Za-z0-9\-\s]+won\s+by\s+\d+\s+(?:runs|wickets)[^\n\.]*)/i);
       const tieMatch = body.match(/([A-Za-z0-9\-\s]+(?:Match tied|No result|Match abandoned)[^\n\.]*)/i);
       const needMatch = body.match(/([A-Za-z0-9\-]+\s+need\s+\d+\s+runs\s+in\s+\d+\s+balls)/i);
 
       if (wonMatch) {
-        resultText = wonMatch[1].trim() + " 🏆";
+        neededRuns = wonMatch[1].trim() + " 🏆";
       } else if (tieMatch) {
-        resultText = tieMatch[1].trim();
+        neededRuns = tieMatch[1].trim();
       } else if (needMatch) {
-        resultText = needMatch[1].trim();
+        neededRuns = needMatch[1].trim();
       } else {
-        const statusMatch = body.match(/([A-Za-z0-9\-\s]+(?:elected to|lead by|trail by|starts at|delayed)[^\n\.]+)/i);
-        resultText = statusMatch ? statusMatch[1].trim() : "Match in Progress";
+        const statusMatch = body.match(/([A-Za-z0-9\-\s]+(?:elected to|lead by|trail by|delayed|starts at)[^\n\.]+)/i);
+        neededRuns = statusMatch ? statusMatch[1].trim() : "Match in Progress";
       }
 
-      // 3. Score & Overs Extraction
+      // 3. Scores & Overs
       let score = "";
       let overs = "";
       const scoreOverRegex = /(\b\d{1,3})[-\/](10|[0-9])\s*\(?([0-5]?\d\.[0-6])\)?/g;
       const allMatches = [...body.matchAll(scoreOverRegex)];
 
       if (allMatches.length > 0) {
-        const crrPos = body.indexOf("CRR");
-        let best = allMatches[0];
-        if (crrPos !== -1) {
-          let minDiff = 999999;
-          for (const m of allMatches) {
-            const diff = Math.abs(m.index - crrPos);
-            if (diff < minDiff) {
-              minDiff = diff;
-              best = m;
-            }
-          }
-        } else {
-          best = allMatches[allMatches.length - 1];
-        }
-        score = `${best[1]}/${best[2]}`;
-        overs = best[3];
+        const last = allMatches[allMatches.length - 1];
+        score = `${last[1]}/${last[2]}`;
+        overs = last[3];
       }
 
       // 4. Over Columns
@@ -188,10 +195,10 @@ async function scrapeLiveData() {
       }
       const lastTwoOvers = recentOvers.slice(-2);
 
-      // 5. Live Ball / Finish Badge
+      // 5. Live Ball
       let liveBall = "";
       if (wonMatch) {
-        liveBall = "FT"; // Full Time / Final
+        liveBall = "FT";
       } else if (lastTwoOvers.length > 0) {
         const latestOver = lastTwoOvers[lastTwoOvers.length - 1];
         if (latestOver.balls.length > 0) {
@@ -208,16 +215,21 @@ async function scrapeLiveData() {
       const rrrMatch = body.match(/RRR\s*[:\n]?\s*([\d\.]+)/i);
       const partMatch = body.match(/(?:Partnership|P'ship)\s*[:\n]?\s*([0-9]+\s*\([0-9]+\))/i);
 
-      let target = "-";
+      let target = "--";
       const targetMatch = body.match(/Target\s*[:\n]?\s*(\d+)/i);
       if (targetMatch) {
         target = targetMatch[1];
+      } else if (needMatch && score) {
+        const runsNeed = needMatch[1].match(/need\s+(\d+)\s+runs/i);
+        if (runsNeed) {
+          target = String(parseInt(score.split("/")[0], 10) + parseInt(runsNeed[1], 10));
+        }
       }
 
       // 7. Batters
       const batterMatches = [...body.matchAll(/([A-Z][a-zA-Z\s\.]+)\s*\*?\s+(\d+)\s*\(([0-9]+)\)/g)];
-      let batter1 = { name: "Batter 1", score: "0 (0)", image: "" };
-      let batter2 = { name: "Batter 2", score: "0 (0)", image: "" };
+      let batter1 = { name: "BATTER 1", score: "0 (0)", image: "" };
+      let batter2 = { name: "BATTER 2", score: "0 (0)", image: "" };
 
       if (batterMatches.length >= 1) {
         const b1Name = batterMatches[0][1].trim().split("\n").pop();
@@ -238,7 +250,7 @@ async function scrapeLiveData() {
 
       // 8. Bowler
       const bowlerMatch = body.match(/([A-Z][a-zA-Z\s\.]+)\s+(\d+-\d+)\s*\((\d+\.?\d*)\)/);
-      let bowler = { name: "Bowler", figures: "0-0 (0.0)", econ: "0.00", image: "" };
+      let bowler = { name: "BOWLER", figures: "0-0 (0.0)", econ: "0.00", image: "" };
 
       if (bowlerMatch) {
         const bName = bowlerMatch[1].trim().split("\n").pop();
@@ -266,18 +278,19 @@ async function scrapeLiveData() {
         score,
         overs,
         liveBall,
-        neededRuns: resultText,
+        neededRuns,
         recentOvers: lastTwoOvers,
-        crr: crrMatch ? crrMatch[1] : "-",
-        rrr: rrrMatch ? rrrMatch[1] : "-",
+        crr: crrMatch ? crrMatch[1] : "--",
+        rrr: rrrMatch ? rrrMatch[1] : "--",
         target,
-        partnership: partMatch ? partMatch[1] : "-",
+        partnership: partMatch ? partMatch[1] : "--",
         batter1,
         batter2,
         bowler
       };
     });
 
+    cachedData.activeUrl = activeMatchUrl;
     if (extracted.team1) cachedData.team1 = extracted.team1;
     if (extracted.team2) cachedData.team2 = extracted.team2;
     if (extracted.team1Logo) cachedData.team1Logo = extracted.team1Logo;
@@ -293,22 +306,32 @@ async function scrapeLiveData() {
     cachedData.target = extracted.target;
     cachedData.partnership = extracted.partnership;
 
-    if (extracted.batter1.name !== "Batter 1") cachedData.batter1 = extracted.batter1;
-    if (extracted.batter2.name !== "Batter 2") cachedData.batter2 = extracted.batter2;
-    if (extracted.bowler.name !== "Bowler") cachedData.bowler = extracted.bowler;
+    if (extracted.batter1.name !== "BATTER 1") cachedData.batter1 = extracted.batter1;
+    if (extracted.batter2.name !== "BATTER 2") cachedData.batter2 = extracted.batter2;
+    if (extracted.bowler.name !== "BOWLER") cachedData.bowler = extracted.bowler;
   } catch (err) {
-    console.warn("Scrape warning:", err.message);
+    console.warn("Scraping tick warning:", err.message);
   }
 }
 
 initBrowser();
 
+app.get("/", (req, res) => {
+  res.json({ status: "online", activeMatchUrl });
+});
+
+// Primary Endpoint: accepts ?url=... and waits for the scrape to complete before responding
 app.get("/api/score", async (req, res) => {
   const reqUrl = req.query.url;
-  if (reqUrl && reqUrl !== activeMatchUrl) {
-    await loadTargetUrl(reqUrl);
+  if (reqUrl && reqUrl.trim() !== activeMatchUrl) {
+    await navigateAndScrape(reqUrl);
   }
   res.status(200).json(cachedData);
+});
+
+process.on("SIGTERM", async () => {
+  if (browser) await browser.close().catch(() => {});
+  process.exit(0);
 });
 
 app.listen(PORT, "0.0.0.0", () => {
