@@ -6,10 +6,13 @@ const { chromium } = require("playwright");
 const app = express();
 const PORT = process.env.PORT || 10000;
 
+// Enable CORS & Body Parsing
 app.use(cors({ origin: "*" }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// ── Match Registry: maps short_id → crex_url ──────────────────────────────
+// IDs are deterministic: first 8 hex chars of SHA256(url)
 const _match_registry = {};
 let _last_used_url =
   "https://crex.com/cricket-live-score/km-vs-pt-12th-match-odisha-t20-league-2026-match-updates-13VD";
@@ -19,6 +22,23 @@ function _url_to_id(url) {
 }
 _match_registry[_url_to_id(_last_used_url)] = _last_used_url;
 
+// URL Slug Team Resolver (Fallback that guarantees teams are never 'TEAM 1' or 'TEAM 2')
+function extractTeamsFromUrl(rawUrl) {
+  try {
+    const urlObj = new URL(rawUrl);
+    const path = urlObj.pathname;
+    const match = path.match(/(?:cricket-live-score|live-score)\/([a-zA-Z0-9\-]+)-vs-([a-zA-Z0-9\-]+)/i);
+    if (match) {
+      const t1 = match[1].toUpperCase();
+      let t2Raw = match[2];
+      const t2Clean = t2Raw.split(/-(?:\d+|match|odi|t20|test|league|cup|tour|final|live|updates)/i)[0].toUpperCase();
+      return { team1: t1, team2: t2Clean };
+    }
+  } catch (e) {}
+  return null;
+}
+
+// ── In-Memory Scrape Cache & Navigation Lock ─────────────────────────────
 const _scrape_cache = {};
 let activeScrapePromise = null;
 let browserInstance = null;
@@ -55,15 +75,17 @@ async function getPage() {
   return pageInstance;
 }
 
-// ── Core Scraper ─────────────────────────────────────────────────────────
+// ── Core Scraper Implementation ──────────────────────────────────────────
 async function scrape_crex_match(rawUrl) {
   const url = rawUrl.trim().replace(/\.+$/, "");
 
+  // Cache hit within 2.5 seconds
   const now = Date.now();
   if (_scrape_cache[url] && now - _scrape_cache[url].timestamp < 2500) {
     return _scrape_cache[url].data;
   }
 
+  // Deduplicate concurrent scrape calls
   if (activeScrapePromise) {
     return activeScrapePromise;
   }
@@ -78,131 +100,89 @@ async function scrape_crex_match(rawUrl) {
         await page.waitForTimeout(2500);
       }
 
-      const result = await page.evaluate((targetUrl) => {
+      const extracted = await page.evaluate(() => {
         const getTxt = (sel) => document.querySelector(sel)?.innerText?.trim() || "";
         const body = document.body.innerText;
 
-        // Helper to extract real URL from lazy-loaded / srcset images
-        const getImgUrl = (img) => {
-          if (!img) return "";
-          const candidates = [
-            img.src,
-            img.getAttribute("data-src"),
-            img.getAttribute("data-lazy-src"),
-            img.getAttribute("srcset"),
-            img.getAttribute("data-srcset"),
-            img.currentSrc
-          ];
-          for (const c of candidates) {
-            if (c && typeof c === "string") {
-              const clean = c.split(",")[0].trim().split(" ")[0].trim();
-              if (clean.startsWith("http") && !clean.includes("data:") && !clean.includes("icon")) {
-                return clean;
+        // Player image finder
+        const findImageNearText = (name) => {
+          if (!name || name.includes("Batter") || name.includes("Bowler")) return "";
+          const all = Array.from(document.querySelectorAll("*")).filter(
+            (el) => el.children.length === 0 && el.textContent.trim().toLowerCase() === name.toLowerCase()
+          );
+          for (const el of all) {
+            let parent = el.parentElement;
+            for (let i = 0; i < 5 && parent; i++) {
+              const img = parent.querySelector("img");
+              if (img) {
+                const src = img.src || img.getAttribute("data-src") || "";
+                if (src && !src.includes("data:image/svg") && !src.includes("icon")) return src;
               }
+              parent = parent.parentElement;
             }
           }
           return "";
         };
 
-        // 1. TEAMS EXTRACTION (URL SLUG + CLEAN TITLE + DOM)
-        let urlTeam1 = "";
-        let urlTeam2 = "";
-        const urlMatch = targetUrl.match(/\/cricket-live-score\/([a-zA-Z0-9\-]+)-vs-([a-zA-Z0-9\-]+)-/i)
-          || window.location.pathname.match(/\/cricket-live-score\/([a-zA-Z0-9\-]+)-vs-([a-zA-Z0-9\-]+)-/i);
-        if (urlMatch) {
-          urlTeam1 = urlMatch[1].toUpperCase();
-          urlTeam2 = urlMatch[2].toUpperCase();
+        // 1. Team Logos: CREX stores all team emblems in /Teams/ vector CDN
+        const teamImgs = Array.from(document.querySelectorAll("img")).filter((img) => {
+          const s = img.src || img.getAttribute("data-src") || "";
+          return s.includes("/Teams/") || (s.includes("Teams") && !s.includes("players") && !s.includes("svg"));
+        });
+
+        let team1Logo = "";
+        let team2Logo = "";
+        if (teamImgs.length >= 2) {
+          team1Logo = teamImgs[0].src || teamImgs[0].getAttribute("data-src") || "";
+          team2Logo = teamImgs[1].src || teamImgs[1].getAttribute("data-src") || "";
+        } else if (teamImgs.length === 1) {
+          team1Logo = teamImgs[0].src || teamImgs[0].getAttribute("data-src") || "";
         }
 
-        let titleTeam1 = "";
-        let titleTeam2 = "";
-        const cleanTitle = (document.title || "").replace(/\(.*?\)/g, "").replace(/\d+[-\/]\d+/g, "");
-        const vsMatch = cleanTitle.match(/([A-Za-z0-9\s\-]+?)\s+(?:vs|Vs|VS)\s+([A-Za-z0-9\s\-]+)/);
-        if (vsMatch) {
-          const t1 = vsMatch[1].trim().split(/[,|\-:]/).pop().trim();
-          const t2 = vsMatch[2].trim().split(/[,|\-:]/)[0].trim();
-          if (t1 && t1.length < 20 && !t1.toLowerCase().includes("live")) titleTeam1 = t1;
-          if (t2 && t2.length < 20 && !t2.toLowerCase().includes("live")) titleTeam2 = t2;
+        // 2. Team Names
+        let team1 = "";
+        let team2 = "";
+
+        // Check document title, e.g. "STA vs MAR Live Score..." or "Stallions vs Markhors..."
+        const titleMatch = document.title.match(/(?:Live\s*Score[:\s-]*)?([A-Za-z0-9\-]+)\s+(?:vs|Vs|VS|v|V)\s+([A-Za-z0-9\-]+)/i);
+        if (titleMatch) {
+          team1 = titleMatch[1].trim();
+          team2 = titleMatch[2].trim();
         }
 
-        const domTeams = Array.from(document.querySelectorAll(
-          "[class*='team-name'], [class*='teamName'], [class*='t-name'], [class*='team_name'], [class*='team'] h2, [class*='team'] h3"
-        )).map((el) => el.innerText.trim()).filter((t) => t.length > 0 && t.length < 25 && !t.includes("\n") && !t.includes("Live"));
-
-        let team1 = domTeams[0] || titleTeam1 || urlTeam1 || "TEAM 1";
-        let team2 = domTeams[1] || titleTeam2 || urlTeam2 || "TEAM 2";
-
-        // 2. TEAM LOGOS (SCAN FOR CREX TEAMS CDN OR HEADER LOGOS)
-        const teamLogosOnPage = Array.from(document.querySelectorAll("img"))
-          .map(getImgUrl)
-          .filter((src) => {
-            const l = src.toLowerCase();
-            return (l.includes("/teams/") || l.includes("team-logo") || l.includes("/team/"))
-              && !l.includes("/players/") && !l.includes("/player/");
-          });
-
-        let team1Logo = teamLogosOnPage[0] || "";
-        let team2Logo = teamLogosOnPage[1] || "";
-
-        // Secondary search near team names
-        const findLogoNearName = (tName) => {
-          if (!tName || tName.includes("TEAM")) return "";
-          const matchNodes = Array.from(document.querySelectorAll("*")).filter((el) => {
-            return el.children.length === 0 && el.textContent.trim().toLowerCase() === tName.toLowerCase();
-          });
-          for (const node of matchNodes) {
-            let p = node.parentElement;
-            for (let i = 0; i < 4 && p; i++) {
-              const imgs = p.querySelectorAll("img");
-              for (const img of imgs) {
-                const u = getImgUrl(img);
-                if (u && !u.includes("/players/") && !u.includes("icon")) return u;
-              }
-              p = p.parentElement;
-            }
-          }
-          return "";
-        };
-
-        if (!team1Logo) team1Logo = findLogoNearName(team1) || findLogoNearName(urlTeam1);
-        if (!team2Logo) team2Logo = findLogoNearName(team2) || findLogoNearName(urlTeam2);
-
-        // Fallback: top 2 non-player images
-        if (!team1Logo || !team2Logo) {
-          const topImages = Array.from(document.querySelectorAll("img")).map(getImgUrl).filter((src) => {
-            const l = src.toLowerCase();
-            return !l.includes("/players/") && !l.includes("/player/") && !l.includes("icon") && !l.includes("logo.png") && !l.includes("crex");
-          });
-          if (!team1Logo && topImages[0]) team1Logo = topImages[0];
-          if (!team2Logo && topImages[1]) team2Logo = topImages[1];
-        }
-
-        // 3. SCORE & OVERS
-        let score = "-/-";
-        let overs = "0.0";
-        const scoreOverRegex = /(\b\d{1,3})[-\/](10|[0-9])\s*\(?([0-5]?\d\.[0-6])\)?/g;
-        const allMatches = [...body.matchAll(scoreOverRegex)];
-
-        if (allMatches.length > 0) {
-          const last = allMatches[allMatches.length - 1];
-          score = `${last[1]}/${last[2]}`;
-          overs = last[3];
-        }
-
-        // 4. ENSURE BATTING TEAM IS ON THE LEFT (TEAM 1)
-        if (score !== "-/-") {
-          const scorePattern = new RegExp(`([A-Za-z0-9\\-]+)\\s+${score.replace('/', '[-\\/]')}`, 'i');
-          const battingScoreMatch = body.match(scorePattern);
-          if (battingScoreMatch) {
-            const battingCode = battingScoreMatch[1].trim().toUpperCase();
-            if (battingCode === team2.toUpperCase() || battingCode === urlTeam2) {
-              const tempT = team1; team1 = team2; team2 = tempT;
-              const tempL = team1Logo; team1Logo = team2Logo; team2Logo = tempL;
-            }
+        // Check header title or series title
+        if (!team1 || !team2) {
+          const headerText = document.querySelector("h1, h2, .match-info, .series-name, .header-title")?.innerText || "";
+          const headerMatch = headerText.match(/([A-Za-z0-9\-]+)\s+(?:vs|Vs|VS)\s+([A-Za-z0-9\-]+)/i);
+          if (headerMatch) {
+            team1 = team1 || headerMatch[1].trim();
+            team2 = team2 || headerMatch[2].trim();
           }
         }
 
-        // 5. MATCH STATUS / WINNER
+        // Check vote/poll buttons in CREX DOM
+        if (!team1 || !team2) {
+          const pollButtons = Array.from(document.querySelectorAll("button, .team-btn, .team-name, .team-card"));
+          const validButtons = pollButtons
+            .map((b) => b.innerText.trim())
+            .filter((t) => t.length >= 2 && t.length <= 15 && !t.includes("\n") && !t.includes("LIVE"));
+          if (validButtons.length >= 2) {
+            team1 = team1 || validButtons[0];
+            team2 = team2 || validButtons[1];
+          }
+        }
+
+        // Check logo alt attributes
+        if (teamImgs[0] && (!team1 || team1.length <= 1)) {
+          const alt1 = teamImgs[0].alt || teamImgs[0].getAttribute("title") || "";
+          if (alt1 && alt1.length < 20) team1 = alt1;
+        }
+        if (teamImgs[1] && (!team2 || team2.length <= 1)) {
+          const alt2 = teamImgs[1].alt || teamImgs[1].getAttribute("title") || "";
+          if (alt2 && alt2.length < 20) team2 = alt2;
+        }
+
+        // 3. Winner Banner / Match Situation
         let neededRuns = "";
         const wonMatch = body.match(/([A-Za-z0-9\-\s]+won\s+by\s+\d+\s+(?:runs|wickets)[^\n\.]*)/i);
         const tieMatch = body.match(/([A-Za-z0-9\-\s]+(?:Match tied|No result|Match abandoned)[^\n\.]*)/i);
@@ -215,11 +195,23 @@ async function scrape_crex_match(rawUrl) {
         } else if (needMatch) {
           neededRuns = needMatch[1].trim();
         } else {
-          const statusMatch = body.match(/([A-Za-z0-9\-\s]+(?:elected to|lead by|trail by|delayed|starts at)[^\n\.]+)/i);
+          const statusMatch = body.match(/([A-Za-z0-9\-\s]+(?:elected to|lead by|trail by|delayed|starts at|opt to)[^\n\.]+)/i);
           neededRuns = statusMatch ? statusMatch[1].trim() : "Match in Progress";
         }
 
-        // 6. RECENT OVERS
+        // 4. Scores & Overs
+        let score = "-/-";
+        let overs = "0.0";
+        const scoreOverRegex = /(\b\d{1,3})[-\/](10|[0-9])\s*\(?([0-5]?\d\.[0-6])\)?/g;
+        const allMatches = [...body.matchAll(scoreOverRegex)];
+
+        if (allMatches.length > 0) {
+          const last = allMatches[allMatches.length - 1];
+          score = `${last[1]}/${last[2]}`;
+          overs = last[3];
+        }
+
+        // 5. Recent Overs
         const recentOvers = [];
         const overBlocks = [...body.matchAll(/Over\s+(\d+)\s+([\s\S]*?)=\s*(\d+)/gi)];
         for (const ob of overBlocks) {
@@ -232,7 +224,7 @@ async function scrape_crex_match(rawUrl) {
         }
         const lastTwoOvers = recentOvers.slice(-2);
 
-        // 7. LIVE BALL
+        // 6. Live Ball
         let liveBall = "";
         if (wonMatch) {
           liveBall = "FT";
@@ -247,7 +239,7 @@ async function scrape_crex_match(rawUrl) {
           liveBall = centerBig ? centerBig[1] : "•";
         }
 
-        // 8. STATS STRIP
+        // 7. Stats Strip
         const crrMatch = body.match(/CRR\s*[:\n]?\s*([\d\.]+)/i);
         const rrrMatch = body.match(/RRR\s*[:\n]?\s*([\d\.]+)/i);
         const partMatch = body.match(/(?:Partnership|P'ship)\s*[:\n]?\s*([0-9]+\s*\([0-9]+\))/i);
@@ -263,27 +255,7 @@ async function scrape_crex_match(rawUrl) {
           }
         }
 
-        // 9. PLAYER HEADSHOT FINDER
-        const findPlayerImage = (pName) => {
-          if (!pName || pName.includes("Batter") || pName.includes("Bowler")) return "";
-          const allNodes = Array.from(document.querySelectorAll("*")).filter((el) => {
-            return el.children.length === 0 && el.textContent.trim().toLowerCase() === pName.toLowerCase();
-          });
-          for (const node of allNodes) {
-            let p = node.parentElement;
-            for (let i = 0; i < 5 && p; i++) {
-              const imgs = p.querySelectorAll("img");
-              for (const img of imgs) {
-                const u = getImgUrl(img);
-                if (u && !u.includes("/Teams/") && !u.includes("icon")) return u;
-              }
-              p = p.parentElement;
-            }
-          }
-          return "";
-        };
-
-        // 10. BATTERS & BOWLER
+        // 8. Batters
         const batterMatches = [...body.matchAll(/([A-Z][a-zA-Z\s\.]+)\s*\*?\s+(\d+)\s*\(([0-9]+)\)/g)];
         let batter1 = { name: "Batter 1", score: "-", image: "" };
         let batter2 = { name: "Batter 2", score: "-", image: "" };
@@ -293,7 +265,7 @@ async function scrape_crex_match(rawUrl) {
           batter1 = {
             name: b1Name,
             score: `${batterMatches[0][2]} (${batterMatches[0][3]})`,
-            image: findPlayerImage(b1Name)
+            image: findImageNearText(b1Name)
           };
         }
         if (batterMatches.length >= 2) {
@@ -301,10 +273,11 @@ async function scrape_crex_match(rawUrl) {
           batter2 = {
             name: b2Name,
             score: `${batterMatches[1][2]} (${batterMatches[1][3]})`,
-            image: findPlayerImage(b2Name)
+            image: findImageNearText(b2Name)
           };
         }
 
+        // 9. Bowler
         const bowlerMatch = body.match(/([A-Z][a-zA-Z\s\.]+)\s+(\d+-\d+)\s*\((\d+\.?\d*)\)/);
         let bowler = { name: "Bowler", figures: "-", econ: "-", image: "" };
 
@@ -322,12 +295,11 @@ async function scrape_crex_match(rawUrl) {
             name: bName,
             figures: bFigs,
             econ: calcEcon,
-            image: findPlayerImage(bName)
+            image: findImageNearText(bName)
           };
         }
 
         return {
-          success: true,
           team1,
           team1Logo,
           team2,
@@ -345,13 +317,26 @@ async function scrape_crex_match(rawUrl) {
           batter2,
           bowler
         };
-      }, url);
+      });
 
-      _scrape_cache[url] = { timestamp: Date.now(), data: result };
-      return result;
+      // Reliable URL slug fallback for team names if page titles were truncated
+      const urlTeams = extractTeamsFromUrl(url);
+      if (!extracted.team1 && urlTeams?.team1) extracted.team1 = urlTeams.team1;
+      if (!extracted.team2 && urlTeams?.team2) extracted.team2 = urlTeams.team2;
+
+      // Final fallback to clean names
+      extracted.team1 = extracted.team1 || urlTeams?.team1 || "TEAM 1";
+      extracted.team2 = extracted.team2 || urlTeams?.team2 || "TEAM 2";
+      extracted.success = true;
+
+      _scrape_cache[url] = { timestamp: Date.now(), data: extracted };
+      return extracted;
     } catch (err) {
       console.error(`[Scraper] Error scraping ${url}:`, err.message);
-      return { success: false, error: err.message };
+      return {
+        success: false,
+        error: `Failed to scrape match: ${err.message}`
+      };
     } finally {
       activeScrapePromise = null;
     }
@@ -360,7 +345,10 @@ async function scrape_crex_match(rawUrl) {
   return activeScrapePromise;
 }
 
-// ── API ROUTES ───────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────────
+// API ROUTES
+// ──────────────────────────────────────────────────────────────────────────
+
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok", service: "cricket-broadcast-scraper" });
 });
@@ -379,39 +367,55 @@ app.all("/api/default-url", (req, res) => {
 
 app.post("/api/match", (req, res) => {
   const url = (req.body?.url || req.query?.url || "").trim();
-  if (!url) return res.status(400).json({ success: false, error: "No URL provided" });
+  if (!url) {
+    return res.status(400).json({ success: false, error: "No URL provided" });
+  }
 
   const match_id = _url_to_id(url);
   _match_registry[match_id] = url;
   _last_used_url = url;
+
+  console.log(`Registered match ${match_id} → ${url}`);
   res.json({ success: true, match_id, url });
 });
 
 app.get("/api/match/:match_id", (req, res) => {
   const url = _match_registry[req.params.match_id];
-  if (url) return res.json({ success: true, match_id: req.params.match_id, url });
+  if (url) {
+    return res.json({ success: true, match_id: req.params.match_id, url });
+  }
   res.status(404).json({ success: false, error: "Match ID not found" });
 });
 
 app.get("/api/match/:match_id/scrape", async (req, res) => {
   const url = _match_registry[req.params.match_id];
-  if (!url) return res.status(404).json({ success: false, error: "Match ID not found" });
+  if (!url) {
+    return res.status(404).json({
+      success: false,
+      error: "Match ID not found. Please provide a valid Crex URL."
+    });
+  }
 
   const data = await scrape_crex_match(url);
-  res.status(data.success ? 200 : 400).json(data);
+  const status = data.success ? 200 : 400;
+  res.status(status).json(data);
 });
 
 app.all("/api/scrape", async (req, res) => {
   let url = req.query?.url || req.body?.url;
   if (!url || !url.toString().trim()) {
-    return res.status(400).json({ success: false, error: "No Crex URL provided" });
+    return res.status(400).json({
+      success: false,
+      error: "No Crex match URL provided."
+    });
   }
 
   url = url.toString().trim();
   _last_used_url = url;
 
   const data = await scrape_crex_match(url);
-  res.status(data.success ? 200 : 400).json(data);
+  const status = data.success ? 200 : 400;
+  res.status(status).json(data);
 });
 
 app.get("/api/score", async (req, res) => {
@@ -428,5 +432,7 @@ process.on("SIGTERM", async () => {
 });
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Preet Sports Relay active on port ${PORT}`);
+  console.log("======================================================");
+  console.log(`🏏 Cricket Live Broadcast Server running on port ${PORT}`);
+  console.log("======================================================");
 });
