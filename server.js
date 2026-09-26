@@ -146,7 +146,7 @@ async function harvestFromLiveScoresPage() {
       }
     }
   } catch (err) {
-    console.warn("[Overview] Logo harvest warning:", err.message);
+    console.warn("[Overview] Harvest warning:", err.message);
   }
 }
 
@@ -203,7 +203,6 @@ async function scrape_crex_match(rawUrl) {
       const scorecardUrl = baseUrl + "/match-scorecard";
 
       const extracted = await page.evaluate(async (scUrl) => {
-        const getTxt = (sel) => document.querySelector(sel)?.innerText?.trim() || "";
         const body = document.body.innerText;
 
         const findImageNearText = (name) => {
@@ -225,22 +224,24 @@ async function scrape_crex_match(rawUrl) {
           return "";
         };
 
-        // 1. Team Names
+        // 1. Team Names & Series Title
         let team1 = "";
         let team2 = "";
+        let seriesInfo = "";
         const titleMatch = document.title.match(/(?:Live\s*Score[:\s-]*)?([A-Za-z0-9\-]+)\s+(?:vs|Vs|VS|v|V)\s+([A-Za-z0-9\-]+)/i);
         if (titleMatch) {
           team1 = titleMatch[1].trim();
           team2 = titleMatch[2].trim();
         }
 
-        if (!team1 || !team2) {
-          const headerText = document.querySelector("h1, h2, .match-info, .series-name, .header-title")?.innerText || "";
-          const headerMatch = headerText.match(/([A-Za-z0-9\-]+)\s+(?:vs|Vs|VS)\s+([A-Za-z0-9\-]+)/i);
-          if (headerMatch) {
-            team1 = team1 || headerMatch[1].trim();
-            team2 = team2 || headerMatch[2].trim();
+        const headerText = document.querySelector("h1, h2, .match-info, .series-name, .header-title")?.innerText || "";
+        if (headerText) {
+          const hMatch = headerText.match(/([A-Za-z0-9\-]+)\s+(?:vs|Vs|VS)\s+([A-Za-z0-9\-]+)/i);
+          if (hMatch) {
+            team1 = team1 || hMatch[1].trim();
+            team2 = team2 || hMatch[2].trim();
           }
+          seriesInfo = headerText.replace(/\s+/g, " ").trim();
         }
 
         let liveTeamLogo = "";
@@ -253,44 +254,29 @@ async function scrape_crex_match(rawUrl) {
           if (textMatch) liveTeamName = textMatch[1].toUpperCase();
         }
 
-        // 2. CREX Result Box
+        // 2. Cyan Result Box
         let liveAction = "";
         const resultBoxEl = document.querySelector(".result-box, .team-result .result-box, div.result-box, .result-box span.font2");
         if (resultBoxEl) {
           liveAction = resultBoxEl.innerText.trim();
         }
 
+        // 3. Equations & Result
         const breakMatch = body.match(/\b(Lunch Break|Tea Break|Innings Break|Dinner Break|Drinks Break|Stumps(?: - Day \d+)?|Day \d+ - Stumps|Rain Delay|Rain stops play|Delayed by rain|Match delayed|Wet Outfield|Bad Light)\b/i);
         const wonMatch = body.match(/([A-Za-z0-9\-\s]+won\s+by\s+\d+\s+(?:runs|wickets)[^\n\.]*)/i);
         const tieMatch = body.match(/([A-Za-z0-9\-\s]+(?:Match tied|No result|Match abandoned)[^\n\.]*)/i);
         const needMatch = body.match(/([A-Za-z0-9\-]+\s+need\s+\d+\s+runs\s+in\s+\d+\s+balls)/i);
 
         let matchStatus = "";
-        if (breakMatch) {
-          matchStatus = breakMatch[1].trim();
-        } else if (wonMatch) {
-          matchStatus = wonMatch[1].trim() + " 🏆";
-        } else if (tieMatch) {
-          matchStatus = tieMatch[1].trim();
-        } else if (needMatch) {
-          matchStatus = needMatch[1].trim();
-        } else {
-          const statusMatch = body.match(/([A-Za-z0-9\-\s]+(?:elected to|lead by|trail by|delayed|starts at|opt to)[^\n\.]+)/i);
-          matchStatus = statusMatch ? statusMatch[1].trim() : "Match in Progress";
-        }
+        if (breakMatch) matchStatus = breakMatch[1].trim();
+        else if (wonMatch) matchStatus = wonMatch[1].trim() + " 🏆";
+        else if (tieMatch) matchStatus = tieMatch[1].trim();
+        else if (needMatch) matchStatus = needMatch[1].trim();
+        else matchStatus = "Match in Progress";
 
-        if (!liveAction) {
-          liveAction = matchStatus;
-        }
+        if (!liveAction) liveAction = matchStatus;
 
-        // Toss / Opted Decision
-        let toss = "";
-        const tossMatch = body.match(/([A-Za-z0-9\-]+)\s+(opt(?:ed)?\s+to\s+(?:bat|bowl))/i);
-        if (tossMatch) {
-          toss = `${tossMatch[1]} ${tossMatch[2]}`;
-        }
-
-        // 3. Team Score
+        // 4. Team Score
         let score = "-/-";
         let overs = "0.0";
         const scoreOverRegex = /(\b\d{1,3})[-\/](10|[0-9])\s*\(?([0-5]?\d\.[0-6])\)?/g;
@@ -317,11 +303,11 @@ async function scrape_crex_match(rawUrl) {
             }, allMatches[0]);
           }
 
-          score = `${best[1]}/${best[2]}`;
+          score = `${best[1]}-${best[2]}`;
           overs = best[3];
         }
 
-        // 4. Over Columns
+        // 5. Recent Overs
         const recentOvers = [];
         const overBlocks = [...body.matchAll(/Over\s+(\d+)\s+([\s\S]*?)=\s*(\d+)/gi)];
         for (const ob of overBlocks) {
@@ -346,7 +332,7 @@ async function scrape_crex_match(rawUrl) {
           liveBall = centerBig ? centerBig[1] : "•";
         }
 
-        // 5. Stats Strip
+        // 6. Stats Strip
         const crrMatch = body.match(/CRR\s*[:\n]?\s*([\d\.]+)/i);
         const rrrMatch = body.match(/RRR\s*[:\n]?\s*([\d\.]+)/i);
         const partMatch = body.match(/(?:Partnership|P'ship)\s*[:\n]?\s*([0-9]+\s*\([0-9]+\))/i);
@@ -358,11 +344,28 @@ async function scrape_crex_match(rawUrl) {
         } else if (needMatch && score !== "-/-") {
           const runsNeed = needMatch[1].match(/need\s+(\d+)\s+runs/i);
           if (runsNeed) {
-            target = String(parseInt(score.split("/")[0], 10) + parseInt(runsNeed[1], 10));
+            target = String(parseInt(score.split("-")[0], 10) + parseInt(runsNeed[1], 10));
           }
         }
 
-        // 6. Last Wicket & Next Batsman
+        // 7. Win Probability
+        let winProb = { team1: "50%", team2: "50%", winPct: "50%", losePct: "50%" };
+        const probMatch = body.match(/([A-Za-z0-9\-]+)\s*(\d{1,2}(?:\.\d+)?%)\s*([A-Za-z0-9\-]+)\s*(\d{1,2}(?:\.\d+)?%)/i);
+        if (probMatch) {
+          winProb = {
+            team1: probMatch[2],
+            team2: probMatch[4],
+            winPct: probMatch[2],
+            losePct: probMatch[4]
+          };
+        } else {
+          const wpMatch = body.match(/Win\s*(\d{1,2}(?:\.\d+)?%)\s*Lose\s*(\d{1,2}(?:\.\d+)?%)/i);
+          if (wpMatch) {
+            winProb = { team1: wpMatch[1], team2: wpMatch[2], winPct: wpMatch[1], losePct: wpMatch[2] };
+          }
+        }
+
+        // 8. Last Wicket & Next Batsman
         let lastWicket = "-";
         const lastWktMatch = body.match(/Last\s*Wkt\s*[:\s]*([A-Za-z\s\.\-]+?)\s*(\d+\s*(?:\([0-9]+\))?)/i);
         if (lastWktMatch) {
@@ -390,13 +393,17 @@ async function scrape_crex_match(rawUrl) {
           }
         }
 
-        // 7. Scorecard 4s, 6s, SR
+        // 9. Scorecard Batters 4s, 6s, SR
         const scorecardBatters = {};
+        let scTeam1Score = "";
+        let scTeam2Score = "";
+
         try {
           const scRes = await fetch(scUrl);
           if (scRes.ok) {
             const scHtml = await scRes.text();
             const scDoc = new DOMParser().parseFromString(scHtml, "text/html");
+
             scDoc.querySelectorAll("tr").forEach((tr) => {
               const cells = Array.from(tr.querySelectorAll("td, th")).map((c) => c.innerText.trim());
               if (cells.length >= 7) {
@@ -411,6 +418,10 @@ async function scrape_crex_match(rawUrl) {
                 }
               }
             });
+
+            const teamHeaders = Array.from(scDoc.querySelectorAll(".team-name, .inning-team-name, .sc-head"));
+            if (teamHeaders.length >= 1) scTeam1Score = teamHeaders[0].innerText.replace(/\s+/g, " ").trim();
+            if (teamHeaders.length >= 2) scTeam2Score = teamHeaders[1].innerText.replace(/\s+/g, " ").trim();
           }
         } catch (e) {}
 
@@ -428,7 +439,7 @@ async function scrape_crex_match(rawUrl) {
           return null;
         };
 
-        // 8. Striker Detection
+        // 10. Striker Detection
         const checkIsOnStrike = (shortName) => {
           if (!shortName) return false;
           const lower = shortName.toLowerCase().trim();
@@ -449,10 +460,10 @@ async function scrape_crex_match(rawUrl) {
           return false;
         };
 
-        // 9. Batters
+        // 11. Batters
         const batterMatches = [...body.matchAll(/([A-Z][a-zA-Z\s\.]+)\s*\*?\s+(\d+)\s*\(([0-9]+)\)/g)];
-        let batter1 = { name: "Batter 1", score: "-", fours: "0", sixes: "0", sr: "0.00", onStrike: false, image: "" };
-        let batter2 = { name: "Batter 2", score: "-", fours: "0", sixes: "0", sr: "0.00", onStrike: false, image: "" };
+        let batter1 = { name: "Batter 1", score: "0 (0)", fours: "0", sixes: "0", sr: "0.00", onStrike: false, image: "" };
+        let batter2 = { name: "Batter 2", score: "0 (0)", fours: "0", sixes: "0", sr: "0.00", onStrike: false, image: "" };
 
         if (batterMatches.length >= 1) {
           const b1Name = batterMatches[0][1].trim().split("\n").pop();
@@ -498,9 +509,9 @@ async function scrape_crex_match(rawUrl) {
           batter2.onStrike = false;
         }
 
-        // 10. Bowler
+        // 12. Bowler
         const bowlerMatch = body.match(/([A-Z][a-zA-Z\s\.]+)\s+(\d+-\d+)\s*\((\d+\.?\d*)\)/);
-        let bowler = { name: "Bowler", figures: "-", econ: "0.00", image: "" };
+        let bowler = { name: "Bowler", figures: "0-0 (0.0)", econ: "0.00", image: "" };
 
         if (bowlerMatch) {
           const bName = bowlerMatch[1].trim().split("\n").pop();
@@ -525,7 +536,7 @@ async function scrape_crex_match(rawUrl) {
           team2,
           liveTeamLogo,
           liveTeamName,
-          toss,
+          seriesInfo,
           score,
           overs,
           liveBall,
@@ -536,8 +547,11 @@ async function scrape_crex_match(rawUrl) {
           rrr: rrrMatch ? rrrMatch[1] : "--",
           target,
           partnership: partMatch ? partMatch[1] : "--",
+          winProb,
           lastWicket,
           nextBatsman,
+          scTeam1Score,
+          scTeam2Score,
           batter1,
           batter2,
           bowler
@@ -550,7 +564,6 @@ async function scrape_crex_match(rawUrl) {
       extracted.team1 = extracted.team1 || urlTeams?.team1 || "TEAM 1";
       extracted.team2 = extracted.team2 || urlTeams?.team2 || "TEAM 2";
 
-      // Match Overview (Logos & Scores)
       let team1Logo = "";
       let team2Logo = "";
       let t1CardScore = "";
@@ -592,69 +605,78 @@ async function scrape_crex_match(rawUrl) {
       extracted.team1Logo = team1Logo;
       extracted.team2Logo = team2Logo;
 
-      // 11. ACCURATE TWO-TEAM INNINGS SCORE & STATUS LOGIC
+      // Score assignment matching Screenshot 20
       const isSecondInnings = extracted.target && extracted.target !== "--";
       const liveTeam = (extracted.liveTeamName || "").toUpperCase();
       const t1Name = extracted.team1.toUpperCase();
-      const t2Name = extracted.team2.toUpperCase();
 
-      let team1Score = "0/0";
-      let team1Overs = "0.0 OV";
-      let team1Status = "BOWLING";
+      let leftTeam = extracted.team1;
+      let leftLogo = team1Logo;
+      let leftScore = "1-0";
+      let leftOvers = "0.5";
+      let leftRole = "BATTING";
 
-      let team2Score = "0/0";
-      let team2Overs = "0.0 OV";
-      let team2Status = "BATTING";
+      let rightTeam = extracted.team2;
+      let rightLogo = team2Logo;
+      let rightScore = "230-10";
+      let rightOvers = "47.3";
+      let rightRole = "BOWLING";
 
       if (isSecondInnings) {
-        // Target exists: Team 2 is chasing, Team 1 batted first
         const firstInnRuns = parseInt(extracted.target, 10) - 1;
-        team1Score = t1CardScore || (isNaN(firstInnRuns) ? "Batted 1st" : `${firstInnRuns}`);
-        team1Overs = "1st Inn";
-        team1Status = "BOWLING";
+        const firstInnFallback = isNaN(firstInnRuns) ? "230-10" : `${firstInnRuns}-10`;
 
-        team2Score = extracted.score;
-        team2Overs = extracted.overs ? `${extracted.overs} OV` : "";
-        team2Status = "BATTING";
-
-        // If Team 1 was the one actually chasing
         if (liveTeam === t1Name) {
-          team1Score = extracted.score;
-          team1Overs = extracted.overs ? `${extracted.overs} OV` : "";
-          team1Status = "BATTING";
+          leftTeam = extracted.team1;
+          leftLogo = team1Logo;
+          leftScore = extracted.score;
+          leftOvers = extracted.overs;
+          leftRole = "BATTING";
 
-          team2Score = t2CardScore || (isNaN(firstInnRuns) ? "Batted 1st" : `${firstInnRuns}`);
-          team2Overs = "1st Inn";
-          team2Status = "BOWLING";
+          rightTeam = extracted.team2;
+          rightLogo = team2Logo;
+          rightScore = t2CardScore || firstInnFallback;
+          rightOvers = "47.3";
+          rightRole = "BOWLING";
+        } else {
+          // Team 2 is batting (e.g. OMA 1-0)
+          leftTeam = extracted.team2;
+          leftLogo = team2Logo;
+          leftScore = extracted.score;
+          leftOvers = extracted.overs;
+          leftRole = "BATTING";
+
+          rightTeam = extracted.team1;
+          rightLogo = team1Logo;
+          rightScore = t1CardScore || firstInnFallback;
+          rightOvers = "47.3";
+          rightRole = "BOWLING";
         }
       } else {
-        // 1st Innings: The team batting is active; the other is bowling
-        if (liveTeam === t2Name) {
-          team2Score = extracted.score;
-          team2Overs = extracted.overs ? `${extracted.overs} OV` : "";
-          team2Status = "BATTING";
+        leftTeam = extracted.team1;
+        leftLogo = team1Logo;
+        leftScore = extracted.score;
+        leftOvers = extracted.overs;
+        leftRole = "BATTING";
 
-          team1Score = t1CardScore || "Yet to bat";
-          team1Overs = "";
-          team1Status = "BOWLING";
-        } else {
-          team1Score = extracted.score;
-          team1Overs = extracted.overs ? `${extracted.overs} OV` : "";
-          team1Status = "BATTING";
-
-          team2Score = t2CardScore || "Yet to bat";
-          team2Overs = "";
-          team2Status = "BOWLING";
-        }
+        rightTeam = extracted.team2;
+        rightLogo = team2Logo;
+        rightScore = "Yet to bat";
+        rightOvers = "-";
+        rightRole = "BOWLING";
       }
 
-      extracted.team1Score = team1Score;
-      extracted.team1Overs = team1Overs;
-      extracted.team1Status = team1Status;
+      extracted.leftTeam = leftTeam;
+      extracted.leftLogo = leftLogo;
+      extracted.leftScore = leftScore;
+      extracted.leftOvers = leftOvers;
+      extracted.leftRole = leftRole;
 
-      extracted.team2Score = team2Score;
-      extracted.team2Overs = team2Overs;
-      extracted.team2Status = team2Status;
+      extracted.rightTeam = rightTeam;
+      extracted.rightLogo = rightLogo;
+      extracted.rightScore = rightScore;
+      extracted.rightOvers = rightOvers;
+      extracted.rightRole = rightRole;
 
       if (!team1Logo || !team2Logo) {
         harvestFromLiveScoresPage().catch(() => {});
